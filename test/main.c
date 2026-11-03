@@ -655,6 +655,48 @@ static int test_soc_timer_irq(void)
     return ok;
 }
 
+/* Test 15: the CONFIRMED clock controller (see soc.h) — CLOCK_CONFIG0
+ * reads back its real documented power-on-reset value (0x40000000),
+ * PLLLOCK is read-only and always reports "locked" regardless of what
+ * software writes to it, and an ordinary gate register (GATES1) is a
+ * normal read/write cell that keeps whatever's written to it. */
+
+static int test_soc_clock(void)
+{
+    static const uint32_t program[] = {
+        0xE3A0143C, /* 0x00 mov r1, #0x3C000000                      */
+        0xE3811605, /* 0x04 orr r1, r1, #0x500000  ; r1 = CLOCK base  */
+        0xE5912000, /* 0x08 ldr r2, [r1]           ; r2 = CONFIG0     */
+        0xE5913040, /* 0x0C ldr r3, [r1, #0x40]    ; r3 = PLLLOCK     */
+        0xE3A04099, /* 0x10 mov r4, #0x99                             */
+        0xE5814040, /* 0x14 str r4, [r1, #0x40]    ; write PLLLOCK (should be ignored) */
+        0xE5915040, /* 0x18 ldr r5, [r1, #0x40]    ; r5 = PLLLOCK again */
+        0xE5814048, /* 0x1C str r4, [r1, #0x48]    ; write GATES1     */
+        0xE5916048, /* 0x20 ldr r6, [r1, #0x48]    ; r6 = GATES1      */
+        0xEAFFFFFE, /* 0x24 b   .                                      */
+    };
+
+    arm1176_t cpu = {0};
+    soc_t soc;
+    arm1176_reset(&cpu);
+    soc_init(&soc, &cpu);
+    soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
+
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x24;
+    int steps = 0;
+    while (cpu.r[15] != self_loop && steps < 200 && !cpu.halted) { arm1176_step(&cpu); steps++; }
+
+    int ok = !cpu.halted && (cpu.r[15] == self_loop)
+           && (cpu.r[2] == 0x40000000u) && (cpu.r[3] == 0xFFFFFFFFu)
+           && (cpu.r[5] == 0xFFFFFFFFu) && (cpu.r[6] == 0x99u);
+    printf("[test 15, SoC: clock controller (CONFIRMED regs)]  "
+           "config0=0x%08x plllock_before=0x%08x plllock_after_write=0x%08x gates1=0x%02x  -> %s\n",
+           cpu.r[2], cpu.r[3], cpu.r[5], cpu.r[6], ok ? "PASS" : "FAIL");
+
+    soc_destroy(&soc);
+    return ok;
+}
+
 int main(void)
 {
     int a = test_arithmetic_loop();
@@ -671,8 +713,9 @@ int main(void)
     int l = test_soc_boot_and_sdram();
     int m = test_soc_uart();
     int n = test_soc_timer_irq();
+    int o = test_soc_clock();
 
-    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n;
+    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o;
     printf("\n%s\n", all_ok ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     return all_ok ? 0 : 1;
 }
