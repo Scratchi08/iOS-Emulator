@@ -23,13 +23,22 @@
  * which one it is:
  *
  *   CONFIRMED   — sourced from a specific community reference for this
- *                 exact chip. Currently: the SecureROM/VROM base
- *                 address (0x20000000, per TheAppleWiki's "VROM
- *                 (S5L8900)" article) and the SDRAM capacity (128MiB,
- *                 per TheAppleWiki's "S5L8900" article). The general
- *                 boot flow — bootrom validates and runs the LLB from
- *                 NOR, LLB runs from SRAM, iBoot runs from DRAM — is
- *                 also confirmed from community sources.
+ *                 exact chip. Currently: the SecureROM/VROM base address
+ *                 (0x20000000, TheAppleWiki's "VROM (S5L8900)" article),
+ *                 the SDRAM capacity (128MiB, TheAppleWiki's "S5L8900"
+ *                 article), and the entire clock controller (base
+ *                 address, register offsets, and real power-on-reset
+ *                 values), sourced from kleemajo's iDroid-notes
+ *                 repository (github.com/kleemajo/iDroid-notes, file
+ *                 "clock"), which documents register-level behavior
+ *                 reverse-engineered directly from openiBoot/LLB
+ *                 disassembly and explicitly cross-references S5L8900-
+ *                 specific values (e.g. the PLL0CON main-divider field
+ *                 width) alongside the sibling S5L8720's, strongly
+ *                 indicating the two chips share this controller. The
+ *                 general boot flow — bootrom validates and runs the
+ *                 LLB from NOR, LLB runs from SRAM, iBoot runs from
+ *                 DRAM — is also confirmed from community sources.
  *   GROUNDED     — not S5L8900-specific, but a real, standard, publicly
  *                  documented ARM PrimeCell peripheral that openiBoot's
  *                  own interrupt.c confirms this SoC family actually
@@ -48,11 +57,26 @@
  *                  hardware register dumps or openiBoot's actual
  *                  plat-s5l8900 hardware headers become available.
  *
+ * IMPORTANT CORRECTION from this round of research: openiBoot's real
+ * plat-s5l8900/pmu.c talks to the PMU (power management: battery/
+ * charger, RTC, power-off) entirely over I2C to an external companion
+ * chip — it is NOT a block of memory-mapped registers at all. The
+ * SOC_CLOCK_BASE block below is therefore genuinely just the clock/PLL
+ * controller (which *is* memory-mapped, and is what's now CONFIRMED);
+ * this file no longer describes it as "clock/power" and doesn't attempt
+ * to model the I2C PMU (see the NOT-implemented-yet list in README.md).
+ * Also newly learned: NOR flash access on real hardware goes through
+ * an SPI controller (openiBoot's clock-gate table shows "spi0 (nor)"),
+ * not a flat memory-mapped flash window the way SOC_NOR_BASE models it
+ * here — that's a known simplification now backed by a concrete reason
+ * rather than just a guess, and the next thing to fix if NOR write
+ * support becomes a priority (see README.md).
+ *
  * Since we currently only run hand-assembled test firmware (which by
  * construction agrees with whatever addresses this file defines),
- * none of this affects correctness *today*. It matters the moment
- * real Apple-signed firmware images are the test target, since those
- * hardcode the real addresses.
+ * the PLACEHOLDER items don't affect correctness *today*. It matters
+ * the moment real Apple-signed firmware images are the test target,
+ * since those hardcode the real addresses.
  */
 
 #ifndef SOC_H
@@ -78,16 +102,48 @@
 #define SOC_NOR_BASE         0x1C000000u   /* PLACEHOLDER */
 #define SOC_NOR_SIZE         0x00100000u   /* PLACEHOLDER: 1MB */
 
-#define SOC_PERIPH_BASE      0x38000000u   /* PLACEHOLDER region for all peripherals below */
+#define SOC_PERIPH_BASE      0x38000000u   /* PLACEHOLDER region for the PL011/PL192/SP804 peripherals below */
 #define SOC_UART0_BASE       (SOC_PERIPH_BASE + 0x0000u)  /* GROUNDED layout (PL011-style), PLACEHOLDER address */
 #define SOC_VIC0_BASE        (SOC_PERIPH_BASE + 0x1000u)  /* GROUNDED layout (PL192, confirmed used by this SoC family), PLACEHOLDER address */
 #define SOC_TIMER_BASE       (SOC_PERIPH_BASE + 0x2000u)  /* GROUNDED layout (SP804-style), PLACEHOLDER address */
-#define SOC_CLOCK_BASE       (SOC_PERIPH_BASE + 0x3000u)  /* Stub only, see below */
-#define SOC_GPIO_BASE        (SOC_PERIPH_BASE + 0x4000u)  /* Stub only, see below */
+#define SOC_GPIO_BASE        (SOC_PERIPH_BASE + 0x4000u)  /* Stub only, see below — GPIO only; power is off-chip I2C, see above */
 #define SOC_PERIPH_SIZE      0x00005000u
 
+/* CONFIRMED: the clock/PLL controller — base address, register
+ * offsets, and real power-on-reset values, from kleemajo's iDroid-notes
+ * "clock" file (see the CONFIRMED note above). Deliberately its own
+ * base rather than folded into SOC_PERIPH_BASE, since this one is a
+ * real, sourced address rather than a placeholder home. */
+#define SOC_CLOCK_BASE            0x3C500000u
+#define SOC_CLOCK_CONFIG0         0x00u
+#define SOC_CLOCK_CONFIG1         0x04u
+#define SOC_CLOCK_CONFIG2         0x08u
+#define SOC_CLOCK_UNKNOWN1        0x0Cu
+#define SOC_CLOCK_UNKNOWN2        0x10u
+#define SOC_CLOCK_UNKNOWN3        0x14u
+#define SOC_CLOCK_PLL0CON         0x20u
+#define SOC_CLOCK_PLL1CON         0x24u
+#define SOC_CLOCK_PLL2CON         0x28u
+#define SOC_CLOCK_PLL0LCNT        0x30u
+#define SOC_CLOCK_PLL1LCNT        0x34u
+#define SOC_CLOCK_PLL2LCNT        0x38u
+#define SOC_CLOCK_UNKNOWN4        0x3Cu
+#define SOC_CLOCK_PLLLOCK         0x40u   /* read-only; always reads back "locked" — see soc.c */
+#define SOC_CLOCK_PLLMODE         0x44u
+#define SOC_CLOCK_GATES1          0x48u
+#define SOC_CLOCK_GATES2          0x4Cu
+#define SOC_CLOCK_GATES3          0x58u
+#define SOC_CLOCK_GATES4          0x68u
+#define SOC_CLOCK_GATES5          0x6Cu
+#define SOC_CLOCK_REGSPACE_WORDS  ((SOC_CLOCK_GATES5 / 4) + 1)
+
 /* IRQ line numbers on VIC0 used by the peripherals this file models.
- * PLACEHOLDER: real S5L8900 IRQ assignments are unconfirmed. */
+ * PLACEHOLDER: real S5L8900 IRQ assignments are unconfirmed, except
+ * that openiBoot's plat-s5l8900/gpio.c confirms GPIO interrupt groups
+ * alone occupy at least IRQ numbers 0-3 and 0x1f-0x21 on real hardware
+ * — i.e. this chip needs more than 32 IRQ lines total, so a single
+ * 32-line VIC0 (all this file currently models) is known-incomplete;
+ * see the second-VIC-instance item in README.md. */
 #define SOC_IRQ_UART0        1
 #define SOC_IRQ_TIMER        2
 
@@ -131,6 +187,13 @@ typedef struct {
     bool     interrupt_pending;
 } soc_timer_t;
 
+/* CONFIRMED register set — see the CONFIRMED note above and soc.c's
+ * clock_read/clock_write for behavior (plain RW passthrough for all of
+ * these except PLLLOCK, which is read-only and always reads "locked"). */
+typedef struct {
+    uint32_t regs[SOC_CLOCK_REGSPACE_WORDS];
+} soc_clock_t;
+
 typedef struct {
     arm1176_t   *cpu;   /* for raising/lowering IRQ */
 
@@ -142,9 +205,9 @@ typedef struct {
     soc_vic_t    vic0;
     soc_uart_t   uart0;
     soc_timer_t  timer;
+    soc_clock_t  clock;
 
-    uint32_t     clock_regs[SOC_PERIPH_SIZE / 4]; /* generic RAZ/WI-with-ready-bits stub, see soc.c */
-    uint32_t     gpio_regs[SOC_PERIPH_SIZE / 4];  /* generic RW stub */
+    uint32_t     gpio_regs[SOC_PERIPH_SIZE / 4];  /* generic RW stub — GPIO only, see the PMU correction above */
 } soc_t;
 
 /* Allocates and zeroes all backing memory, connects `cpu`'s bus to this
