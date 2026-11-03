@@ -1,4 +1,4 @@
-# iphone2g-emu — ARM1176JZF-S core + S5L8900 SoC scaffold
+# iphone2g-emu - ARM1176JZF-S core + S5L8900 SoC scaffold
 
 An iPhone 2G / iPhone OS 1.0 emulator, built bottom-up: a complete
 ARM1176JZF-S CPU core (integer ARM+Thumb, CP15/MMU, VFP11, Jazelle),
