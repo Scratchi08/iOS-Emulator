@@ -228,19 +228,57 @@ void soc_tick(soc_t *soc)
 }
 
 /* ------------------------------------------------------------------ */
-/* Clock/power and GPIO: intentionally trivial stubs.                   */
+/* Clock/PLL controller (CONFIRMED — see soc.h) and the GPIO stub.      */
 /*                                                                      */
-/* Real clock/PLL/power-management registers are entirely SoC-specific  */
-/* and undocumented for the S5L8900. Modeling them precisely is out of  */
-/* scope for now (see soc.h); what actually matters in practice is that */
-/* firmware's inevitable "spin until the PLL reports locked" polling    */
-/* loops terminate instead of hanging forever. So: any clock register   */
-/* that has never been written reads back as 0xFFFFFFFF (all status     */
-/* bits appear set, regardless of which ones real firmware is actually  */
-/* checking); once software writes a register, further reads return    */
-/* exactly what was written, like an ordinary control register.         */
-/* GPIO is a plain read/write scratch array with no pin modeling.       */
+/* Register offsets and reset values below are sourced from kleemajo's  */
+/* iDroid-notes "clock" file (real disassembly of openiBoot/LLB's       */
+/* clock_reset routine) — see soc.h's header comment. PLLLOCK is        */
+/* modeled as read-only, always reporting "locked": real firmware polls */
+/* it after writing a PLLxLCNT register and we have no real PLL         */
+/* settling behavior to model, so the honest choice is to let that      */
+/* polling loop terminate immediately rather than fabricate a fake      */
+/* delay. Every other clock register is a plain read/write cell,        */
+/* seeded with the real clock_reset() value where one is known (0       */
+/* otherwise) — including the gate registers (GATES1/3/4/5), so code    */
+/* that reads back its own gate-enable writes sees consistent state.    */
+/*                                                                      */
+/* GPIO remains a plain read/write scratch array with no pin modeling — */
+/* see soc.h for why this is *not* also standing in for power           */
+/* management anymore (that's off-chip I2C on real hardware).           */
 /* ------------------------------------------------------------------ */
+
+static void clock_reset_defaults(soc_clock_t *c)
+{
+    memset(c->regs, 0, sizeof(c->regs));
+    /* Values below are exactly what openiBoot's clock_reset() (iBoot
+     * variant) writes on real hardware, per the CONFIRMED source. */
+    c->regs[SOC_CLOCK_CONFIG0  / 4] = 0x40000000u;
+    c->regs[SOC_CLOCK_CONFIG1  / 4] = 0x00000000u;
+    c->regs[SOC_CLOCK_CONFIG2  / 4] = 0x80008000u;
+    c->regs[SOC_CLOCK_UNKNOWN1 / 4] = 0x80008000u;
+    c->regs[SOC_CLOCK_UNKNOWN2 / 4] = 0x00008000u;
+    c->regs[SOC_CLOCK_UNKNOWN4 / 4] = 0x00004400u;
+    c->regs[SOC_CLOCK_GATES1   / 4] = 0x00035FE7u;
+    c->regs[SOC_CLOCK_GATES3   / 4] = 0xFFABAFFFu;
+    c->regs[SOC_CLOCK_GATES4   / 4] = 0x00004FFFu;
+    c->regs[SOC_CLOCK_GATES5   / 4] = 0x00FDFFFFu;
+    /* PLLLOCK is read-only and synthesized in clock_read(); its stored
+     * value here is never actually consulted. */
+}
+
+static uint32_t clock_read(soc_clock_t *c, uint32_t off)
+{
+    if (off == SOC_CLOCK_PLLLOCK) return 0xFFFFFFFFu; /* always "locked" — see comment above */
+    uint32_t idx = off / 4;
+    return (idx < SOC_CLOCK_REGSPACE_WORDS) ? c->regs[idx] : 0;
+}
+
+static void clock_write(soc_clock_t *c, uint32_t off, uint32_t val)
+{
+    if (off == SOC_CLOCK_PLLLOCK) return; /* read-only status register */
+    uint32_t idx = off / 4;
+    if (idx < SOC_CLOCK_REGSPACE_WORDS) c->regs[idx] = val;
+}
 
 static uint32_t stub_read(uint32_t *regs, uint32_t count, uint32_t off, bool default_all_ones)
 {
@@ -276,8 +314,8 @@ static uint32_t soc_bus_read32(void *ctx, uint32_t addr)
         return vic_read(&s->vic0, addr - SOC_VIC0_BASE);
     if (addr >= SOC_TIMER_BASE && addr < SOC_TIMER_BASE + 0x1000)
         return timer_read(&s->timer, addr - SOC_TIMER_BASE);
-    if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + 0x1000)
-        return stub_read(s->clock_regs, SOC_PERIPH_SIZE / 4, addr - SOC_CLOCK_BASE, true);
+    if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + SOC_CLOCK_REGSPACE_WORDS * 4)
+        return clock_read(&s->clock, addr - SOC_CLOCK_BASE);
     if (addr >= SOC_GPIO_BASE && addr < SOC_GPIO_BASE + 0x1000)
         return stub_read(s->gpio_regs, SOC_PERIPH_SIZE / 4, addr - SOC_GPIO_BASE, false);
     return 0;
@@ -300,8 +338,8 @@ static void soc_bus_write32(void *ctx, uint32_t addr, uint32_t val)
         { vic_write(&s->vic0, addr - SOC_VIC0_BASE, val); return; }
     if (addr >= SOC_TIMER_BASE && addr < SOC_TIMER_BASE + 0x1000)
         { timer_write(&s->timer, addr - SOC_TIMER_BASE, val); return; }
-    if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + 0x1000)
-        { stub_write(s->clock_regs, SOC_PERIPH_SIZE / 4, addr - SOC_CLOCK_BASE, val); return; }
+    if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + SOC_CLOCK_REGSPACE_WORDS * 4)
+        { clock_write(&s->clock, addr - SOC_CLOCK_BASE, val); return; }
     if (addr >= SOC_GPIO_BASE && addr < SOC_GPIO_BASE + 0x1000)
         { stub_write(s->gpio_regs, SOC_PERIPH_SIZE / 4, addr - SOC_GPIO_BASE, val); return; }
 }
@@ -374,6 +412,7 @@ void soc_init(soc_t *soc, arm1176_t *cpu)
     soc->sram      = calloc(1, SOC_SRAM_SIZE);
     soc->sdram     = calloc(1, SOC_SDRAM_SIZE);
     soc->nor       = calloc(1, SOC_NOR_SIZE);
+    clock_reset_defaults(&soc->clock);
 
     arm_bus_t bus;
     bus.read8 = soc_bus_read8;   bus.read16 = soc_bus_read16;   bus.read32 = soc_bus_read32;
