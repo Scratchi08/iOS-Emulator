@@ -1,4 +1,4 @@
-# iphone2g-emu - ARM1176JZF-S core + S5L8900 SoC scaffold
+# iphone2g-emu — ARM1176JZF-S core + S5L8900 SoC scaffold
 
 An iPhone 2G / iPhone OS 1.0 emulator, built bottom-up: a complete
 ARM1176JZF-S CPU core (integer ARM+Thumb, CP15/MMU, VFP11, Jazelle),
@@ -30,15 +30,15 @@ include/vfp.h             VFP register state and public API (ditto)
 include/jazelle.h         Jazelle scope notes and public API (ditto)
 board/soc.c              S5L8900 SoC/board layer: memory-map dispatch,
                           PL192-style VIC, PL011-style UART, SP804-style
-                          timer, clock/GPIO stubs (see soc.h — separate from
+                          timer, CONFIRMED clock controller, GPIO stub (see soc.h — separate from
                           src/ since this is the board the CPU plugs into,
                           not part of the CPU die)
 include/soc.h             SoC memory map and peripheral state. Its header
                           comment is required reading before trusting any
                           address in it — see "What's implemented" below
 test/test_bus.c/.h       Flat-RAM bus used only for standalone CPU-only testing
-test/main.c              Fourteen hand-assembled smoke-test programs (3 ARM,
-                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 3 SoC)
+test/main.c              Fifteen hand-assembled smoke-test programs (3 ARM,
+                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 4 SoC)
 Makefile                 `make`, `make run`, `make clean`
 ```
 
@@ -188,40 +188,62 @@ make run
   peripherals the CPU is actually plugged into. **Read `soc.h`'s header
   comment before trusting any address**: it labels every region/base
   address as CONFIRMED (sourced from a specific community reference for
-  this exact chip — currently just the SecureROM base and SDRAM
-  capacity), GROUNDED (a real, standard, publicly-documented ARM
+  this exact chip), GROUNDED (a real, standard, publicly-documented ARM
   PrimeCell register layout that this SoC family is confirmed to
   actually use, at an unconfirmed base address), or PLACEHOLDER (picked
   purely to give every region a non-overlapping home). The S5L8900 has
-  no public datasheet; this is as far as free-text search tools get
-  before the remaining detail lives only in decompiled/reverse-engineered
-  binaries (openiBoot's `plat-s5l8900` source tree is the next place to
-  look for real values).
+  no public datasheet, so CONFIRMED items come from community reverse
+  engineering rather than an Apple/Samsung source — currently the
+  SecureROM base, SDRAM capacity, and the entire clock/PLL controller,
+  sourced from kleemajo's iDroid-notes repository, which documents
+  register-level behavior reverse-engineered directly from
+  openiBoot/LLB disassembly.
   - Memory regions: SecureROM/VROM (boot ROM, CPU reset PC points here
     via `soc_init()` — real hardware does *not* start at address 0 the
     way the generic ARM convention assumes), SRAM, SDRAM (128MiB,
-    confirmed capacity), and a read-only-for-now NOR flash window.
+    confirmed capacity), and a read-only-for-now NOR flash window (see
+    the NOR-is-actually-SPI correction below).
+  - **Clock/PLL controller — CONFIRMED**: real base address
+    (`0x3C500000`), real register offsets (CONFIG0-2, three PLLCON/
+    PLLLCNT pairs, five gate registers, etc.), and real power-on-reset
+    values matching openiBoot's actual `clock_reset()` routine (e.g.
+    CONFIG0 resets to `0x40000000`, GATES1 to `0x35FE7`) — test 15
+    checks this directly. PLLLOCK is modeled as read-only and always
+    reports "locked": real firmware polls it after configuring a PLL,
+    and rather than fabricate fake settling-time behavior we have no
+    basis for, the honest choice is to let that poll terminate
+    immediately. This also surfaced two real corrections to the original
+    design. First, openiBoot's actual PMU driver talks to power
+    management entirely over **I2C to an external companion chip** — it
+    is not memory-mapped at all, so this block is now accurately
+    described as "clock" rather than "clock/power", and no I2C/PMU
+    emulation exists yet (see the not-yet-implemented list). Second,
+    real NOR flash access goes through an SPI controller rather than a
+    flat memory-mapped window, per the same source's clock-gate table
+    (`spi0 (nor)`) — a known simplification now backed by a concrete
+    reason instead of just a guess.
   - **Interrupt controller**: PL192-style VIC (confirmed as the right
     family — openiBoot's own `interrupt.c` names `VICINTENABLE`,
     `VICINTENCLEAR`, `VICINTSELECT`, `VICSWPRIORITYMASK`,
-    `VICVECTADDRS`, stock PL192 register names). IRQ/FIQ routing via
-    `VICINTSELECT`, enable/clear, software-forced interrupts, and a
-    simplified (non-priority-stack) vector address readback.
+    `VICVECTADDRS`, stock PL192 register names; base address still
+    PLACEHOLDER). IRQ/FIQ routing via `VICINTSELECT`, enable/clear,
+    software-forced interrupts, and a simplified (non-priority-stack)
+    vector address readback. Separately confirmed: openiBoot's
+    `plat-s5l8900/gpio.c` registers GPIO interrupt groups on IRQ numbers
+    0-3 and 0x1f-0x21, meaning real hardware needs more than 32 lines
+    total — our single 32-line VIC0 is therefore known-incomplete, not
+    just unconfirmed (see the not-yet-implemented list).
   - **UART**: PL011-style register set (data register, flag register,
     baud-rate divisors, line/control registers, masked/raw interrupt
-    status). Transmitted bytes are captured to a growable buffer
-    (`soc_uart_t.tx_capture`, what test 13 checks) and optionally echoed
-    live to stdout (`tx_echo`).
+    status; base address still PLACEHOLDER). Transmitted bytes are
+    captured to a growable buffer (`soc_uart_t.tx_capture`, what test 13
+    checks) and optionally echoed live to stdout (`tx_echo`).
   - **Timer**: SP804-style single-channel down-counter with periodic/
-    one-shot modes and an IRQ-on-underflow, wired into the VIC. Test 14
-    proves the full path — timer underflow to VIC to CPU IRQ exception
-    — end to end.
-  - **Clock/power and GPIO**: intentionally trivial stubs, not modeled
-    in any real detail (entirely undocumented for this chip). Clock
-    registers default to reading back all-ones until written, so
-    firmware's inevitable "spin until the PLL reports locked" loops
-    terminate instead of hanging forever; GPIO is a plain read/write
-    scratch array with no pin modeling.
+    one-shot modes and an IRQ-on-underflow, wired into the VIC (base
+    address still PLACEHOLDER). Test 14 proves the full path — timer
+    underflow to VIC to CPU IRQ exception — end to end.
+  - **GPIO**: intentionally a trivial read/write scratch array with no
+    pin modeling (base address still PLACEHOLDER).
   - **Timing model**: `soc_tick()` — called once per `arm1176_step()` by
     the caller, not automatically — charges exactly one timer tick per
     CPU instruction. Not remotely cycle-accurate, but simple,
@@ -234,25 +256,38 @@ These are the natural next milestones, ordered by what unblocks the
 most (getting to an actual boot attempt) rather than strictly by
 subsystem:
 
-1. **Real S5L8900 register values**: replace the PLACEHOLDER base
-   addresses in `soc.h` with real ones — most productively by pulling
-   openiBoot's actual `plat-s5l8900` hardware headers (confirmed to
-   exist and to be the right source; see the SoC section above) rather
-   than continuing to guess. This is the highest-leverage remaining
-   item: it's what makes real Apple-signed firmware images (rather than
-   hand-assembled test programs) a viable test target.
-2. **NAND flash + NOR write/erase**: NOR is currently read-only from the
-   CPU's side (fine for boot-time code fetch, not for anything that
-   modifies flash), and NAND (where iPhone OS 1.0 itself actually lives,
-   as opposed to just the early boot chain) isn't modeled at all yet.
-3. **A second VIC instance, and real IRQ line assignments.** Only VIC0
+1. **Remaining real S5L8900 register values**: the clock/PLL controller
+   is now CONFIRMED (base address, offsets, and reset values — see
+   above), but VIC0/UART0/timer/GPIO base addresses are still
+   PLACEHOLDER. Next place to look: openiBoot's actual `plat-s5l8900`
+   hardware headers (confirmed to exist; e.g. `gpio.c` includes
+   `hardware/gpio.h`) — the specific header files themselves weren't
+   reachable through available search/fetch tools this round (GitHub's
+   raw-content host and directory browser both refused automated
+   access; only individual `.c` files turned up through code-search
+   indexes), so this is a "try again with different tools/access" item,
+   not a dead end.
+2. **I2C bus + PMU emulation.** Newly confirmed: real power management
+   (battery/charger, RTC, power-off) is NOT memory-mapped — it's an
+   external chip talked to over I2C (`plat-s5l8900/pmu.c`). Nothing
+   here emulates an I2C controller or a PMU device yet; boot code that
+   expects real PMU responses over I2C will stall or misbehave rather
+   than just reading stub registers.
+3. **NAND flash + real NOR (SPI) emulation**: NOR is currently a flat
+   read-only memory window (fine for boot-time code fetch, not for
+   anything that modifies flash, and not how real hardware actually
+   accesses it — see the SPI correction above), and NAND (where iPhone
+   OS 1.0 itself actually lives, as opposed to just the early boot
+   chain) isn't modeled at all yet.
+4. **A second VIC instance, and real IRQ line assignments.** Only VIC0
    (32 lines) exists right now with placeholder IRQ numbers for UART0/
-   the timer; real hardware likely needs more lines than that once more
-   peripherals (I2C/PMU, GPIO interrupts, NAND controller, etc.) show up.
-4. **TrustZone** (Monitor mode / secure world). Whether this matters
+   the timer; openiBoot's `gpio.c` confirms real hardware uses IRQ
+   numbers up through at least 0x21 for GPIO alone, so a single 32-line
+   VIC0 is known-incomplete, not just unconfirmed.
+5. **TrustZone** (Monitor mode / secure world). Whether this matters
    depends on how the S5L8900 boot ROM / iBoot chain actually uses it;
    worth revisiting once real firmware is running far enough to tell.
-5. **Cycle-accurate timing.** Cycle counts returned by `arm1176_step()`
+6. **Cycle-accurate timing.** Cycle counts returned by `arm1176_step()`
    are rough approximations, not modeled against the real pipeline —
    including CP15 page-table-walk/TLB timing and VFP op latency
    (VDIV/VSQRT are charged a flat approximate cost, not the real
@@ -261,22 +296,22 @@ subsystem:
    tied to a real clock rate. Low priority until something timing-
    sensitive (e.g. a busy-wait calibrated against a real clock) shows
    up in actual boot code.
-6. Supersections (16MB) and the ARMv6 extended AP[2]/APX permission
+7. Supersections (16MB) and the ARMv6 extended AP[2]/APX permission
    model (SCTLR.XP=1) — see `cp15.h` for why the classic 2-bit AP model
    was chosen instead as the practical default.
-7. A handful of ARMv6-specific Thumb encodings that share opcode space
+8. A handful of ARMv6-specific Thumb encodings that share opcode space
    with the classic 19 formats but aren't decoded yet: CPS, SETEND,
    REV/REV16/REVSH, SXTB/SXTH/UXTB/UXTH (all currently fall through to a
    silent no-op rather than executing or halting — flagged with a TODO
    comment at the relevant dispatch point in `arm1176_thumb.c`).
-8. VFP gaps noted in `vfp.h`: half-precision, fused multiply-add,
+9. VFP gaps noted in `vfp.h`: half-precision, fused multiply-add,
    fixed-point convert, precise FPSCR exception flags, flush-to-zero,
    and CPACR-based access control (see the VFP11 section above).
-9. A real Jazelle bytecode engine, if it ever turns out iPhone OS 1.0
+10. A real Jazelle bytecode engine, if it ever turns out iPhone OS 1.0
    (or something else run on this emulator) actually needs one — see
    `jazelle.h` for why that's considered unlikely enough to defer
    indefinitely rather than a near-term milestone.
-10. Some rarer-but-real corner cases are intentionally deferred and
+11. Some rarer-but-real corner cases are intentionally deferred and
     flagged with `TODO` comments in the source: PC-as-operand+12 quirk
     for register-shifted data processing, unaligned LDR word-rotate
     behavior, full privilege enforcement on MSR, BKPT (ARM and Thumb),
