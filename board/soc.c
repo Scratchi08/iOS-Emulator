@@ -317,7 +317,7 @@ static uint32_t soc_bus_read32(void *ctx, uint32_t addr)
     if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + SOC_CLOCK_REGSPACE_WORDS * 4)
         return clock_read(&s->clock, addr - SOC_CLOCK_BASE);
     if (addr >= SOC_GPIO_BASE && addr < SOC_GPIO_BASE + 0x1000)
-        return stub_read(s->gpio_regs, SOC_PERIPH_SIZE / 4, addr - SOC_GPIO_BASE, false);
+        return stub_read(s->gpio_regs, SOC_GPIO_SIZE / 4, addr - SOC_GPIO_BASE, false);
     return 0;
 }
 
@@ -341,7 +341,7 @@ static void soc_bus_write32(void *ctx, uint32_t addr, uint32_t val)
     if (addr >= SOC_CLOCK_BASE && addr < SOC_CLOCK_BASE + SOC_CLOCK_REGSPACE_WORDS * 4)
         { clock_write(&s->clock, addr - SOC_CLOCK_BASE, val); return; }
     if (addr >= SOC_GPIO_BASE && addr < SOC_GPIO_BASE + 0x1000)
-        { stub_write(s->gpio_regs, SOC_PERIPH_SIZE / 4, addr - SOC_GPIO_BASE, val); return; }
+        { stub_write(s->gpio_regs, SOC_GPIO_SIZE / 4, addr - SOC_GPIO_BASE, val); return; }
 }
 
 /* 16/8-bit accesses: memory regions get real narrow accessors; every
