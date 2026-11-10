@@ -578,7 +578,8 @@ static int test_soc_boot_and_sdram(void)
 static int test_soc_uart(void)
 {
     static const uint32_t program[] = {
-        0xE3A01438, /* mov r1, #0x38000000              ; UART0 base   */
+        0xE3A0143C, /* mov r1, #0x3C000000                            */
+        0xE38118C0, /* orr r1, r1, #0xC00000 ; r1 = UART0 (0x3CC00000) */
         0xE3A02001, /* mov r2, #1                                     */
         0xE3822C01, /* orr r2, r2, #0x100                             */
         0xE5812030, /* str r2, [r1, #0x30]  ; CR = UARTEN|TXE         */
@@ -597,7 +598,7 @@ static int test_soc_uart(void)
     soc_init(&soc, &cpu);
     soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
 
-    uint32_t self_loop = SOC_SECUREROM_BASE + 0x28;
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x2C;
     int steps = 0;
     while (cpu.r[15] != self_loop && steps < 200 && !cpu.halted) { arm1176_step(&cpu); steps++; }
 
@@ -625,9 +626,9 @@ static int test_soc_timer_irq(void)
         0xE3A020A0, /* mov r2, #0xA0             ; ENABLE|IRQEN                */
         0xE5812008, /* str r2, [r1, #8]          ; TIMER CONTROL = 0xA0        */
         0xE3A03438, /* mov r3, #0x38000000                                     */
-        0xE3833A01, /* orr r3, r3, #0x1000       ; r3 = VIC0 base (0x38001000) */
-        0xE3A04004, /* mov r4, #4                ; bit for IRQ line 2 (timer)  */
-        0xE5834010, /* str r4, [r3, #0x10]       ; VIC INTENABLE |= bit2       */
+        0xE38338E0, /* orr r3, r3, #0xE00000     ; r3 = VIC0 base (0x38E00000) */
+        0xE3A04040, /* mov r4, #0x40             ; bit for IRQ line 6 (timer)  */
+        0xE5834010, /* str r4, [r3, #0x10]       ; VIC INTENABLE |= bit6       */
         0xE321F053, /* msr cpsr_c, #0x53         ; clear I, keep F + SVC mode  */
         0xEAFFFFFE, /* b   .                     ; wait for the interrupt      */
     };
@@ -697,6 +698,40 @@ static int test_soc_clock(void)
     return ok;
 }
 
+/* Test 16: GPIO now lives at its CONFIRMED address (0x3E400000, from the
+ * iPod touch 1G device tree). It is still just a scratch array, so this
+ * checks the address is wired and that a write is visible to a read. */
+
+static int test_soc_gpio_address(void)
+{
+    static const uint32_t program[] = {
+        0xE3A0143E, /* 0x00 mov r1, #0x3E000000                      */
+        0xE3811840, /* 0x04 orr r1, r1, #0x400000  ; r1 = GPIO base  */
+        0xE3A02077, /* 0x08 mov r2, #0x77                            */
+        0xE5812010, /* 0x0C str r2, [r1, #0x10]                      */
+        0xE5913010, /* 0x10 ldr r3, [r1, #0x10]                      */
+        0xEAFFFFFE, /* 0x14 b   .                                     */
+    };
+
+    arm1176_t cpu = {0};
+    soc_t soc;
+    arm1176_reset(&cpu);
+    soc_init(&soc, &cpu);
+    soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
+
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x14;
+    int steps = 0;
+    while (cpu.r[15] != self_loop && steps < 200 && !cpu.halted) { arm1176_step(&cpu); steps++; }
+
+    int ok = !cpu.halted && (cpu.r[15] == self_loop)
+           && (cpu.r[3] == 0x77u) && (soc.gpio_regs[0x10 / 4] == 0x77u);
+    printf("[test 16, SoC: GPIO at CONFIRMED 0x3E400000]  r3=0x%02x  -> %s\n",
+           cpu.r[3], ok ? "PASS" : "FAIL");
+
+    soc_destroy(&soc);
+    return ok;
+}
+
 int main(void)
 {
     int a = test_arithmetic_loop();
@@ -714,8 +749,9 @@ int main(void)
     int m = test_soc_uart();
     int n = test_soc_timer_irq();
     int o = test_soc_clock();
+    int pp = test_soc_gpio_address();
 
-    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o;
+    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && pp;
     printf("\n%s\n", all_ok ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     return all_ok ? 0 : 1;
 }
