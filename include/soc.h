@@ -19,7 +19,7 @@
  * it comes from community reverse engineering of iBoot/the bootrom
  * (mostly the iPhone Dev Team / iDroid Project's openiBoot, which
  * genuinely ran on real iPhone 2G hardware). This file distinguishes
- * three confidence levels; every #define below is commented with
+ * four confidence levels; every #define below is commented with
  * which one it is:
  *
  *   CONFIRMED   — sourced from a specific community reference for this
@@ -39,6 +39,43 @@
  *                 general boot flow — bootrom validates and runs the
  *                 LLB from NOR, LLB runs from SRAM, iBoot runs from
  *                 DRAM — is also confirmed from community sources.
+ *
+ *                 NEW this round — the peripheral map. Apple's own
+ *                 device tree for the iPod touch 1G (an S5L8900X
+ *                 device; dump: github.com/dizimka, gist 2922441,
+ *                 "ioRegDumpIPT1G") lists an IODeviceMemory address
+ *                 for every on-chip block. Each peripheral's `reg` is
+ *                 an offset into the "arm-io" window, which the same
+ *                 tree maps at 0x38000000. From it: VIC0 0x38E00000
+ *                 and VIC1 0x38E01000 (node compatible = "vic,pl192",
+ *                 so the PL192 claim below is now Apple's own label,
+ *                 not just openiBoot's register names), GPIO
+ *                 0x3E400000, and — independently re-confirming the
+ *                 earlier source — the clock controller at 0x3C500000.
+ *                 UART0 at 0x3CC00000 is corroborated by a real iPhone
+ *                 OS kernel boot log from the S5LBox emulator
+ *                 ("AppleS5L8900XSerial ... uart0 at 0x3cc00000") and
+ *                 by The iPhone Wiki's sibling-chip (S5L8720) page. A
+ *                 second S5L8900 IOReg (iPod1,1, pastebin VubPbsE0)
+ *                 repeats the same addresses and supplies the clock
+ *                 rates below. Caveat: these dumps are from an iPod
+ *                 touch; the iPhone 2G shares the SoC, so the SoC's own
+ *                 blocks are the same, but board-level peripherals
+ *                 (baseband UART, etc.) differ.
+ *   INFERRED     — not stated by any source, but follows from confirmed
+ *                  facts by reasoning, so more trustworthy than a
+ *                  placeholder and less than CONFIRMED. SDRAM base
+ *                  0x08000000: the same device tree puts the 12MB
+ *                  framebuffer ("vram") at 0x0F400000 and the panic RAM
+ *                  ("pram") at 0x0FFFC000, both of which must lie
+ *                  inside the 128MiB SDRAM, which pins its base to
+ *                  0x08000000. SRAM base 0x22000000: the AMC node's
+ *                  second register window is 0x2C000 bytes at that
+ *                  address and openiBoot-era sources say the LLB runs
+ *                  from SRAM; separately, the QEMU-iOS author reports
+ *                  the bootrom jumping into code at 0x22000000 that is
+ *                  absent from public ROM dumps. Consistent with SRAM,
+ *                  but the size here is only a lower bound.
  *   GROUNDED     — not S5L8900-specific, but a real, standard, publicly
  *                  documented ARM PrimeCell peripheral that openiBoot's
  *                  own interrupt.c confirms this SoC family actually
@@ -46,10 +83,15 @@
  *                  VICINTENCLEAR, VICINTSELECT, VICSWPRIORITYMASK,
  *                  VICVECTADDRS — stock PL192 VIC register names). The
  *                  UART (PL011-style) and timer (SP804-style) register
- *                  *layouts* here are similarly standard, well-
- *                  documented ARM PrimeCells; whether the S5L8900 uses
- *                  exactly these two is a reasonable but unconfirmed
- *                  bet, not a verified fact.
+ *                  *layouts* here are standard ARM PrimeCells used as a
+ *                  stand-in, and should be treated as likely WRONG for
+ *                  this chip: the S5L8900's serial driver is Apple's
+ *                  "AppleS5L8900XSerial" and the Linux binding list
+ *                  carries a separate `apple,s5l-uart`, i.e. a
+ *                  Samsung-family UART rather than a PL011. Their
+ *                  *base addresses* are now real (UART0) or still
+ *                  placeholder (timer); the register layouts are
+ *                  unverified either way (see README item B1).
  *   PLACEHOLDER  — a base address or size picked to give every region
  *                  a sensible, non-overlapping home so the emulator
  *                  works end-to-end, but not sourced from anywhere.
@@ -93,27 +135,63 @@
 #define SOC_SECUREROM_BASE   0x20000000u   /* CONFIRMED (TheAppleWiki: VROM (S5L8900)) */
 #define SOC_SECUREROM_SIZE   0x00040000u   /* PLACEHOLDER: 256KB, real size unconfirmed */
 
-#define SOC_SRAM_BASE        0x22000000u   /* PLACEHOLDER */
-#define SOC_SRAM_SIZE        0x00020000u   /* PLACEHOLDER: 128KB */
+#define SOC_SRAM_BASE        0x22000000u   /* INFERRED, see above */
+#define SOC_SRAM_SIZE        0x0002C000u   /* INFERRED lower bound (AMC window length); real size unconfirmed */
 
-#define SOC_SDRAM_BASE       0x08000000u   /* PLACEHOLDER base address... */
-#define SOC_SDRAM_SIZE       0x08000000u   /* ...but CONFIRMED size: 128MiB (TheAppleWiki: S5L8900) */
+#define SOC_SDRAM_BASE       0x08000000u   /* INFERRED (framebuffer + panic RAM must fit inside) */
+#define SOC_SDRAM_SIZE       0x08000000u   /* CONFIRMED: 128MiB (TheAppleWiki: S5L8900) */
 
-#define SOC_NOR_BASE         0x1C000000u   /* PLACEHOLDER */
+#define SOC_NOR_BASE         0x1C000000u   /* PLACEHOLDER (and real NOR is SPI-attached — see the correction above) */
 #define SOC_NOR_SIZE         0x00100000u   /* PLACEHOLDER: 1MB */
 
-#define SOC_PERIPH_BASE      0x38000000u   /* PLACEHOLDER region for the PL011/PL192/SP804 peripherals below */
-#define SOC_UART0_BASE       (SOC_PERIPH_BASE + 0x0000u)  /* GROUNDED layout (PL011-style), PLACEHOLDER address */
-#define SOC_VIC0_BASE        (SOC_PERIPH_BASE + 0x1000u)  /* GROUNDED layout (PL192, confirmed used by this SoC family), PLACEHOLDER address */
-#define SOC_TIMER_BASE       (SOC_PERIPH_BASE + 0x2000u)  /* GROUNDED layout (SP804-style), PLACEHOLDER address */
-#define SOC_GPIO_BASE        (SOC_PERIPH_BASE + 0x4000u)  /* Stub only, see below — GPIO only; power is off-chip I2C, see above */
-#define SOC_PERIPH_SIZE      0x00005000u
+/* The "arm-io" peripheral window. CONFIRMED: device-tree `ranges` maps
+ * the peripherals' offset space at 0x38000000, and every peripheral
+ * `reg` below is that offset (so absolute = 0x38000000 + reg). */
+#define SOC_ARMIO_BASE       0x38000000u
+
+#define SOC_VIC0_BASE        0x38E00000u   /* CONFIRMED (PL192, first of two) */
+#define SOC_VIC1_BASE        0x38E01000u   /* CONFIRMED address; NOT YET MODELED — README item B2 */
+#define SOC_UART0_BASE       0x3CC00000u   /* CONFIRMED address; register LAYOUT unverified (see GROUNDED note) */
+#define SOC_GPIO_BASE        0x3E400000u   /* CONFIRMED address; register layout unmodeled (plain scratch array) */
+#define SOC_GPIO_SIZE        0x00001000u
+
+/* PLACEHOLDER: the one peripheral we model whose real address is still
+ * unknown. Sits inside the arm-io window at an offset where no device
+ * seen in the transcribed part of the device tree lives. */
+#define SOC_TIMER_BASE       (SOC_ARMIO_BASE + 0x2000u)
+
+/* CONFIRMED addresses of other on-chip blocks (same device tree), listed
+ * so the not-yet-modeled ones (README item B6) start from real values
+ * instead of a fresh search. None of these are modeled. Per-device IRQ
+ * numbers are in the same dump and are deliberately NOT transcribed
+ * here — that belongs to B2, done with the source open. */
+#define SOC_SHA1_BASE        0x38000000u
+#define SOC_DMAC0_BASE       0x38200000u   /* PL080 DMA controller */
+#define SOC_USBOTG_BASE      0x38400000u
+#define SOC_AMC_BASE         0x38500000u
+#define SOC_ADM_BASE         0x38800000u
+#define SOC_CLCD_BASE        0x38900000u   /* display controller */
+#define SOC_NANDCTL_BASE     0x38A00000u   /* "flash-controller0" */
+#define SOC_CEATA_BASE       0x38B00000u
+#define SOC_AES_BASE         0x38C00000u
+#define SOC_SDIO_BASE        0x38D00000u
+#define SOC_EDGEIC_BASE      0x38E02000u
+#define SOC_DMAC1_BASE       0x39900000u
+#define SOC_POWER_BASE       0x39A00000u
+
+/* CONFIRMED clock rates from the iPod1,1 IOReg (device-tree properties):
+ * crystal 24MHz, timebase 6MHz, CPU 412MHz, bus 103MHz, peripheral
+ * 51.5MHz, memory ~137.33MHz. Not used by the model yet (README B5). */
+#define SOC_CLK_CRYSTAL_HZ     24000000u
+#define SOC_CLK_TIMEBASE_HZ     6000000u
+#define SOC_CLK_CPU_HZ        412000000u
+#define SOC_CLK_BUS_HZ        103000000u
+#define SOC_CLK_PERIPH_HZ      51500000u
 
 /* CONFIRMED: the clock/PLL controller — base address, register
  * offsets, and real power-on-reset values, from kleemajo's iDroid-notes
  * "clock" file (see the CONFIRMED note above). Deliberately its own
- * base rather than folded into SOC_PERIPH_BASE, since this one is a
- * real, sourced address rather than a placeholder home. */
+ * base constant; it sits inside the arm-io window like everything else. */
 #define SOC_CLOCK_BASE            0x3C500000u
 #define SOC_CLOCK_CONFIG0         0x00u
 #define SOC_CLOCK_CONFIG1         0x04u
@@ -137,15 +215,17 @@
 #define SOC_CLOCK_GATES5          0x6Cu
 #define SOC_CLOCK_REGSPACE_WORDS  ((SOC_CLOCK_GATES5 / 4) + 1)
 
-/* IRQ line numbers on VIC0 used by the peripherals this file models.
- * PLACEHOLDER: real S5L8900 IRQ assignments are unconfirmed, except
- * that openiBoot's plat-s5l8900/gpio.c confirms GPIO interrupt groups
- * alone occupy at least IRQ numbers 0-3 and 0x1f-0x21 on real hardware
- * — i.e. this chip needs more than 32 IRQ lines total, so a single
- * 32-line VIC0 (all this file currently models) is known-incomplete;
- * see the second-VIC-instance item in README.md. */
-#define SOC_IRQ_UART0        1
-#define SOC_IRQ_TIMER        2
+/* IRQ line numbers on VIC0 for the two peripherals this file models.
+ * PLACEHOLDER: the real UART/timer assignments are not yet transcribed
+ * (README B2). They were previously 1 and 2, which collided with GPIO
+ * interrupt groups — openiBoot's gpio.c and the device tree both put
+ * GPIO on IRQs 0-3 and 0x1f-0x21 — so they now use 5 and 6, which no
+ * transcribed device claims. That still isn't a claim about hardware:
+ * devices in the un-transcribed part of the tree might use them. Note
+ * this chip needs >32 lines in total (two VICs), so VIC0 alone is
+ * known-incomplete (B2). */
+#define SOC_IRQ_UART0        5
+#define SOC_IRQ_TIMER        6
 
 /* ------------------------------------------------------------------ */
 /* Peripheral state                                                     */
@@ -207,7 +287,7 @@ typedef struct {
     soc_timer_t  timer;
     soc_clock_t  clock;
 
-    uint32_t     gpio_regs[SOC_PERIPH_SIZE / 4];  /* generic RW stub — GPIO only, see the PMU correction above */
+    uint32_t     gpio_regs[SOC_GPIO_SIZE / 4];  /* generic RW stub — GPIO only, see the PMU correction above */
 } soc_t;
 
 /* Allocates and zeroes all backing memory, connects `cpu`'s bus to this
