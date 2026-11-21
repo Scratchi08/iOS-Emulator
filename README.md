@@ -37,8 +37,8 @@ include/soc.h             SoC memory map and peripheral state. Its header
                           comment is required reading before trusting any
                           address in it — see "What's implemented" below
 test/test_bus.c/.h       Flat-RAM bus used only for standalone CPU-only testing
-test/main.c              Sixteen hand-assembled smoke-test programs (3 ARM,
-                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 5 SoC)
+test/main.c              Seventeen hand-assembled smoke-test programs (3 ARM,
+                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 6 SoC)
 Makefile                 `make`, `make run`, `make clean`
 ```
 
@@ -214,14 +214,31 @@ make run
     with GPIO interrupt groups (IRQs 0-3 and 0x1f-0x21 per both the device
     tree and openiBoot's `gpio.c`); they are now 5 and 6 (still
     placeholder — see B2).
+  - **Timer and NOR confirmed; an earlier claim retracted.** A Pastebin
+    IOReg of an actual iPhone 2G (M68AP) lists every node by
+    unit-address, which equals its `reg` offset into the arm-io window,
+    so absolute = `0x38000000` + offset. That gives the **timer at
+    `0x3E200000`** (node `timer@6200000`; the iPod dump's `reg` bytes
+    decode to the same offset, size `0x1000`) and the **watchdog at
+    `0x3E300000`**. The tree's `ranges` has a second window (child
+    `0x10000000` to parent `0x18000000`); its decode is validated by
+    `vrom@18000000` landing exactly on the confirmed `0x20000000`, and it
+    puts **NOR at `0x24000000`**. This **retracts** an earlier README/
+    `soc.h` claim that NOR is SPI-attached: that came from a clock-gate
+    table labeled `spi0 (nor)` which belongs to the sibling S5L8720. On
+    the iPhone 2G, NOR is a memory-mapped CFI parallel flash, SPI0/SPI1
+    drive the LCD and SPI2 the multitouch controller — so the original
+    flat NOR window was the right shape.
   - Memory regions: SecureROM/VROM at `0x20000000` (CONFIRMED; the CPU's
     reset PC points here via `soc_init()`, since real hardware does *not*
     start at address 0), SDRAM 128MiB at `0x08000000` (size CONFIRMED,
     base INFERRED: the framebuffer at `0x0F400000` and panic RAM at
     `0x0FFFC000` in the device tree must fit inside it), SRAM at
     `0x22000000` (INFERRED; size `0x2C000` is only a lower bound taken
-    from a device-tree window there), and a read-only NOR window
-    (PLACEHOLDER, and not how real NOR works — see B4).
+    from a device-tree window there; an `edram` node at `0x18000000`
+    may be the real on-chip RAM instead — unresolved), and a read-only
+    NOR window at `0x24000000` (CONFIRMED base; size is a placeholder —
+    see B4).
   - **Clock/PLL controller — CONFIRMED**: register offsets and power-on-
     reset values matching openiBoot's `clock_reset()` (CONFIG0 resets to
     `0x40000000`, GATES1 to `0x35FE7`); test 15. PLLLOCK is read-only and
@@ -238,10 +255,13 @@ make run
     `AppleS5L8900XSerial`, and the Linux binding list has a separate
     `apple,s5l-uart` — a Samsung-family UART). It works for our tests
     because test and model agree with each other; real firmware would not.
-    TX is captured to `soc_uart_t.tx_capture` and optionally echoed.
-  - **Timer**: SP804-style stand-in at a PLACEHOLDER address (the one
-    modeled peripheral with no known real address); the real timer's
-    layout is also unverified. Test 14 proves the timer-to-VIC-to-CPU-IRQ
+    TX is captured to `soc_uart_t.tx_capture` and optionally echoed. The
+    tree labels UART0 "iap" (dock serial) and UART4 (`0x3CC10000`)
+    "debug"; which one iBoot uses for its console is unverified.
+  - **Timer**: real base (`0x3E200000`, CONFIRMED on the iPhone 2G tree)
+    but an SP804-style stand-in layout that is likely wrong: the sibling
+    S5L8720's timer block is Samsung PWM-style (counter/compare buffer
+    registers), not SP804, and the S5L8900's own layout is unverified. Test 14 proves the timer-to-VIC-to-CPU-IRQ
     path end to end.
   - **GPIO**: real address, but a plain read/write scratch array (test 16).
   - **Timing model**: `soc_tick()` — called once per `arm1176_step()` by
@@ -256,11 +276,12 @@ ARM1176JZF-S core) first, then Part B (the S5L8900 SoC/board).** Within
 each part, items are ordered by next logical milestone. IDs (A1, B3, ...)
 are stable so commits and notes can refer to them.
 
-Status right now: Part A is untouched; Part B1 is partly done (the
-bases for VIC, UART0, GPIO and clock are now real; timer/WDT/I2C/SPI/NOR
-and the UART/timer register layouts are not). B1 was started at the
-maintainer's request ahead of Part A, since it's a research task that
-doesn't conflict with core work.
+Status right now: Part A is untouched. Part B1's *address* work is
+essentially done — every peripheral base on the iPhone 2G's SoC is now
+traced to a source (see below); what's left in B1 is register *layouts*
+and two memory-size questions. B1 was started at the maintainer's request
+ahead of Part A, since it's a research task that doesn't conflict with
+core work.
 
 ### Part A — ARM1176JZF-S core (`src/`, `include/cp15.h`, `vfp.h`, `jazelle.h`)
 
@@ -322,21 +343,20 @@ doesn't conflict with core work.
 
 ### Part B — S5L8900 SoC/board (`board/`, `include/soc.h`)
 
-- **B1. Remaining real S5L8900 register values** *(partly done)*. Done:
-  VIC0/VIC1, UART0, GPIO and clock bases, SDRAM/SRAM bases (inferred), and
-  a table of the other blocks' addresses (SHA1, DMAC0/1, USB OTG, CLCD,
-  NAND controller, AES, SDIO, power) in `soc.h`. **Still open:**
-  1. Timer base address (and the real timer's register layout).
-  2. Watchdog, I2C, SPI, USB PHY and NOR-related bases — they come after
-     the point where the device-tree dump was truncated by the fetch
-     tool's size limit. The fix is to read the rest of that dump
-     (`dizimka/2922441` or the iPod1,1 pastebin `VubPbsE0`); the middle of
-     the file is a very large audio-controller blob, so a raw download
-     would be easier than the fetch tool.
-  3. The UART's real register layout (Samsung-style, per the Linux
-     binding hint) — replace the PL011 stand-in once a source for offsets
-     is found; openiBoot's UART driver is the likely one.
-  4. Whether the iPhone 2G's map differs from the iPod touch's.
+- **B1. Real S5L8900 register values** *(addresses done; layouts open)*.
+  Done, all traced to the iPhone 2G (M68AP) node tree and/or the iPod touch
+  dumps: VIC0/VIC1, UART0/1/3/4, GPIO, clock, timer, watchdog, I2C0/1,
+  SPI0/1/2, USB PHY, NAND controllers, NOR, plus the rest of the on-chip
+  blocks, all as constants in `soc.h`. **Still open:**
+  1. The timer's register layout. The model is an SP804 stand-in; the
+     sibling S5L8720's timer page documents a PWM-style block, which is the
+     likeliest shape but is unverified for the S5L8900.
+  2. The UART's register layout (Samsung-style per the Linux binding hint,
+     not PL011), and which UART is the console.
+  3. SRAM versus `edram`: whether the on-chip RAM the LLB runs from is the
+     `0x22000000` region or the `0x18000000` `edram` node, and its size.
+  4. NOR's real size (placeholder 1MB; NVRAM sits at +`0xFC000` so it is at
+     least that).
   Rule for this item: only addresses traceable to a specific source get
   promoted from PLACEHOLDER; reasoning-only results are labeled INFERRED.
 - **B2. A second VIC instance, and real IRQ line assignments.** VIC1's
@@ -346,16 +366,19 @@ doesn't conflict with core work.
   needed); those numbers were deliberately not transcribed yet and should
   be, with the source open, as part of this item. UART/timer IRQ lines are
   still placeholders (5 and 6).
-- **B3. I2C controller + PMU emulation.** Real power management
-  (battery/charger, RTC, power-off) is NOT memory-mapped — it's an
-  external chip talked to over I2C (`plat-s5l8900/pmu.c`). Nothing here
-  emulates an I2C controller or a PMU device yet; boot code that expects
-  real PMU responses will stall or misbehave.
-- **B4. SPI controller + real NOR, and NAND.** NOR is currently a flat
-  read-only memory window (fine for boot-time code fetch, not for
-  anything that modifies flash, and not how real hardware accesses it —
-  the clock-gate table shows `spi0 (nor)`). NAND, where iPhone OS 1.0
-  itself actually lives, isn't modeled at all.
+- **B3. I2C controller + PMU emulation.** Real power management is NOT
+  memory-mapped — it is an NXP PCF50635 PMU at I2C address `0x73` on I2C0
+  (`0x3C600000`), alongside the audio codec (`0x1A`), accelerometer
+  (`0x1D`) and ambient-light sensor (`0x49`); I2C1 (`0x3C900000`) holds the
+  camera. All of that is from the device tree. Nothing here emulates an
+  I2C controller or any device on it yet; boot code that expects PMU
+  responses will stall or misbehave.
+- **B4. NOR write/erase, and NAND.** NOR is a flat read-only window at its
+  confirmed address, which is the right shape for a CFI parallel flash; what
+  is missing is the CFI command interface for writes/erases and the real
+  size. NAND, where iPhone OS 1.0 itself lives, isn't modeled at all — and
+  the tree shows *two* NAND controller instances (`0x38A00000` and
+  `0x38F00000`).
 - **B5. Real timing for peripherals.** `soc_tick()` charges one timer
   tick per CPU instruction — deterministic, but unrelated to a real clock
   rate. The real rates are now known (24MHz crystal, 6MHz timebase, 412MHz
@@ -364,7 +387,7 @@ doesn't conflict with core work.
   controller's PLL configuration, which needs B1's timer layout first.
 - **B6. Peripherals not yet modeled** (addresses are in `soc.h` for most):
   display controller (CLCD), NAND controller, DMA, SHA1/AES engines, SDIO,
-  USB OTG, multitouch, watchdog, RTC, and real GPIO pin modeling. Actually
+  USB OTG, multitouch (SPI2), the LCD panel (SPI0/1), baseband/bluetooth UARTs, watchdog, RTC, and real GPIO pin modeling. Actually
   booting real firmware needs boot-ROM/firmware images supplied by the user
   from their own device — those are Apple's and are not something this
   project bundles or should.
