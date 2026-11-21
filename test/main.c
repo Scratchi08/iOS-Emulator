@@ -619,8 +619,8 @@ static int test_soc_uart(void)
 static int test_soc_timer_irq(void)
 {
     static const uint32_t program[] = {
-        0xE3A01438, /* mov r1, #0x38000000       ; r1 = 0x38000000            */
-        0xE3811C20, /* orr r1, r1, #0x2000       ; r1 = TIMER base (0x38002000)*/
+        0xE3A0143E, /* mov r1, #0x3E000000                                     */
+        0xE3811820, /* orr r1, r1, #0x200000     ; r1 = TIMER base (0x3E200000)*/
         0xE3A02003, /* mov r2, #3                ; countdown value             */
         0xE5812000, /* str r2, [r1]              ; TIMER LOAD = 3              */
         0xE3A020A0, /* mov r2, #0xA0             ; ENABLE|IRQEN                */
@@ -732,6 +732,35 @@ static int test_soc_gpio_address(void)
     return ok;
 }
 
+/* Test 17: NOR flash is memory-mapped at its CONFIRMED address 0x24000000
+ * (CFI parallel NOR per the iPhone 2G device tree — not SPI), so the CPU
+ * can read data placed in it directly. */
+
+static int test_soc_nor_readable(void)
+{
+    static const uint32_t program[] = {
+        0xE3A01424, /* 0x00 mov r1, #0x24000000   ; NOR base        */
+        0xE5912000, /* 0x04 ldr r2, [r1]                            */
+        0xEAFFFFFE, /* 0x08 b   .                                    */
+    };
+
+    arm1176_t cpu = {0};
+    soc_t soc;
+    arm1176_reset(&cpu);
+    soc_init(&soc, &cpu);
+    soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
+    soc.nor[0] = 0xEF; soc.nor[1] = 0xBE; soc.nor[2] = 0xAD; soc.nor[3] = 0xDE; /* 0xDEADBEEF, little-endian */
+
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x08;
+    int steps = 0;
+    while (cpu.r[15] != self_loop && steps < 100 && !cpu.halted) { arm1176_step(&cpu); steps++; }
+
+    int ok = !cpu.halted && cpu.r[2] == 0xDEADBEEFu;
+    printf("[test 17, SoC: NOR mapped at CONFIRMED 0x24000000]  r2=0x%08x  -> %s\n", cpu.r[2], ok ? "PASS" : "FAIL");
+    soc_destroy(&soc);
+    return ok;
+}
+
 int main(void)
 {
     int a = test_arithmetic_loop();
@@ -750,8 +779,9 @@ int main(void)
     int n = test_soc_timer_irq();
     int o = test_soc_clock();
     int pp = test_soc_gpio_address();
+    int qq = test_soc_nor_readable();
 
-    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && pp;
+    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && pp && qq;
     printf("\n%s\n", all_ok ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     return all_ok ? 0 : 1;
 }
