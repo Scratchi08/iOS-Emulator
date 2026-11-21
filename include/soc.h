@@ -58,10 +58,13 @@
  *                 by The iPhone Wiki's sibling-chip (S5L8720) page. A
  *                 second S5L8900 IOReg (iPod1,1, pastebin VubPbsE0)
  *                 repeats the same addresses and supplies the clock
- *                 rates below. Caveat: these dumps are from an iPod
- *                 touch; the iPhone 2G shares the SoC, so the SoC's own
- *                 blocks are the same, but board-level peripherals
- *                 (baseband UART, etc.) differ.
+ *                 rates below. Caveat: two of the three dumps are from an
+ *                 iPod touch. The third, an IOReg node tree of an actual
+ *                 iPhone 2G (M68AP, pastebin PFAZxhUV), lists every node
+ *                 by unit-address and matches the iPod dumps on every
+ *                 shared block, so the map below holds for the target
+ *                 device; only board-level extras (baseband/bluetooth
+ *                 UARTs, camera, etc.) differ between devices.
  *   INFERRED     — not stated by any source, but follows from confirmed
  *                  facts by reasoning, so more trustworthy than a
  *                  placeholder and less than CONFIRMED. SDRAM base
@@ -75,7 +78,7 @@
  *                  from SRAM; separately, the QEMU-iOS author reports
  *                  the bootrom jumping into code at 0x22000000 that is
  *                  absent from public ROM dumps. Consistent with SRAM,
- *                  but the size here is only a lower bound.
+ *                  but the size here is only a lower bound. UNRESOLVED: the iPhone 2G device tree also has an "edram" node at 0x18000000 (via the second arm-io range), which may be the on-chip RAM the LLB actually runs from; it is not modeled (README B1).
  *   GROUNDED     — not S5L8900-specific, but a real, standard, publicly
  *                  documented ARM PrimeCell peripheral that openiBoot's
  *                  own interrupt.c confirms this SoC family actually
@@ -89,9 +92,10 @@
  *                  "AppleS5L8900XSerial" and the Linux binding list
  *                  carries a separate `apple,s5l-uart`, i.e. a
  *                  Samsung-family UART rather than a PL011. Their
- *                  *base addresses* are now real (UART0) or still
- *                  placeholder (timer); the register layouts are
- *                  unverified either way (see README item B1).
+ *                  *base addresses* are now real (UART0, timer); the
+ *                  register layouts are unverified either way — the
+ *                  sibling S5L8720's timer is Samsung PWM-style
+ *                  (TCNTB/TCMPB), not SP804 (see README item B1).
  *   PLACEHOLDER  — a base address or size picked to give every region
  *                  a sensible, non-overlapping home so the emulator
  *                  works end-to-end, but not sourced from anywhere.
@@ -107,12 +111,14 @@
  * controller (which *is* memory-mapped, and is what's now CONFIRMED);
  * this file no longer describes it as "clock/power" and doesn't attempt
  * to model the I2C PMU (see the NOT-implemented-yet list in README.md).
- * Also newly learned: NOR flash access on real hardware goes through
- * an SPI controller (openiBoot's clock-gate table shows "spi0 (nor)"),
- * not a flat memory-mapped flash window the way SOC_NOR_BASE models it
- * here — that's a known simplification now backed by a concrete reason
- * rather than just a guess, and the next thing to fix if NOR write
- * support becomes a priority (see README.md).
+ * RETRACTION of an earlier claim: this file previously said NOR flash is
+ * SPI-attached, based on a clock-gate table labeled "spi0 (nor)". That
+ * table belongs to the sibling S5L8720 (iPod touch 2G), not this chip.
+ * The iPhone 2G's own device tree (IOReg of an M68AP, pastebin PFAZxhUV)
+ * shows a CFI parallel NOR ("AppleARMCFIFlashController") memory-mapped
+ * at 0x24000000, with SPI0/SPI1 wired to the LCD panel and SPI2 to the
+ * multitouch controller. So a flat memory-mapped NOR window is the right
+ * shape after all; only CFI write/erase commands are missing (README B4).
  *
  * Since we currently only run hand-assembled test firmware (which by
  * construction agrees with whatever addresses this file defines),
@@ -141,8 +147,8 @@
 #define SOC_SDRAM_BASE       0x08000000u   /* INFERRED (framebuffer + panic RAM must fit inside) */
 #define SOC_SDRAM_SIZE       0x08000000u   /* CONFIRMED: 128MiB (TheAppleWiki: S5L8900) */
 
-#define SOC_NOR_BASE         0x1C000000u   /* PLACEHOLDER (and real NOR is SPI-attached — see the correction above) */
-#define SOC_NOR_SIZE         0x00100000u   /* PLACEHOLDER: 1MB */
+#define SOC_NOR_BASE         0x24000000u   /* CONFIRMED: device-tree nor-flash@1C000000 through the second arm-io range (child 0x10000000 -> parent 0x18000000); that decode is validated by vrom@18000000 landing exactly on 0x20000000 */
+#define SOC_NOR_SIZE         0x00100000u   /* PLACEHOLDER: 1MB (device tree puts NVRAM at +0xFC000, so the real part is at least this big) */
 
 /* The "arm-io" peripheral window. CONFIRMED: device-tree `ranges` maps
  * the peripherals' offset space at 0x38000000, and every peripheral
@@ -155,10 +161,11 @@
 #define SOC_GPIO_BASE        0x3E400000u   /* CONFIRMED address; register layout unmodeled (plain scratch array) */
 #define SOC_GPIO_SIZE        0x00001000u
 
-/* PLACEHOLDER: the one peripheral we model whose real address is still
- * unknown. Sits inside the arm-io window at an offset where no device
- * seen in the transcribed part of the device tree lives. */
-#define SOC_TIMER_BASE       (SOC_ARMIO_BASE + 0x2000u)
+/* CONFIRMED address (node timer@6200000 in both the iPod1,1 dump and the
+ * iPhone 2G M68AP tree; the iPod dump's reg is {0x06200000, 0x1000}, i.e.
+ * 0x38000000 + 0x06200000, size 0x1000). The register LAYOUT modeled in
+ * soc.c is still an SP804 stand-in and is likely wrong (see GROUNDED). */
+#define SOC_TIMER_BASE       0x3E200000u
 
 /* CONFIRMED addresses of other on-chip blocks (same device tree), listed
  * so the not-yet-modeled ones (README item B6) start from real values
@@ -178,6 +185,30 @@
 #define SOC_EDGEIC_BASE      0x38E02000u
 #define SOC_DMAC1_BASE       0x39900000u
 #define SOC_POWER_BASE       0x39A00000u
+#define SOC_NANDCTL1_BASE    0x38F00000u   /* second "flash-controller0" instance */
+#define SOC_JPEG_BASE        0x39000000u
+#define SOC_TVOUT_BASE       0x39300000u
+#define SOC_MPVD_BASE        0x39600000u
+#define SOC_CAMIN_BASE       0x39700000u
+#define SOC_H264BPD_BASE     0x39800000u
+#define SOC_MBX_BASE         0x3B000000u   /* PowerVR MBX GPU */
+#define SOC_SPI0_BASE        0x3C300000u   /* LCD panel on the iPhone 2G */
+#define SOC_USBPHY_BASE      0x3C400000u   /* "otgphyctrl" */
+#define SOC_I2C0_BASE        0x3C600000u   /* PMU (PCF50635 at I2C addr 0x73), audio codec 0x1A, accelerometer 0x1D, light sensor 0x49 */
+#define SOC_I2C1_BASE        0x3C900000u   /* camera (0x3C) */
+#define SOC_I2S0_BASE        0x3CA00000u
+#define SOC_UART1_BASE       0x3CC04000u   /* baseband */
+#define SOC_UART3_BASE       0x3CC0C000u   /* bluetooth */
+#define SOC_UART4_BASE       0x3CC10000u   /* labeled "debug" in the tree; UART0 above is labeled "iap" (dock). Which one iBoot prints its console to is unverified. */
+#define SOC_I2S1_BASE        0x3CD00000u
+#define SOC_SPI1_BASE        0x3CE00000u   /* LCD panel */
+#define SOC_PKE_BASE         0x3D000000u
+#define SOC_SPI2_BASE        0x3D200000u   /* multitouch */
+#define SOC_PRNG_BASE        0x3E100000u
+#define SOC_WDT_BASE         0x3E300000u   /* address from node wdt@6300000; its size was not seen */
+#define SOC_CHIPID_BASE      0x3E500000u
+#define SOC_EDRAM_BASE       0x18000000u   /* "edram" node; purpose/size unresolved (see INFERRED SRAM note) */
+#define SOC_PMU_I2C_ADDR     0x73u
 
 /* CONFIRMED clock rates from the iPod1,1 IOReg (device-tree properties):
  * crystal 24MHz, timebase 6MHz, CPU 412MHz, bus 103MHz, peripheral
