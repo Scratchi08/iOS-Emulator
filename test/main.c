@@ -578,18 +578,17 @@ static int test_soc_boot_and_sdram(void)
 static int test_soc_uart(void)
 {
     static const uint32_t program[] = {
-        0xE3A0143C, /* mov r1, #0x3C000000                            */
-        0xE38118C0, /* orr r1, r1, #0xC00000 ; r1 = UART0 (0x3CC00000) */
-        0xE3A02001, /* mov r2, #1                                     */
-        0xE3822C01, /* orr r2, r2, #0x100                             */
-        0xE5812030, /* str r2, [r1, #0x30]  ; CR = UARTEN|TXE         */
-        0xE3A03048, /* mov r3, #0x48        ; 'H'                     */
-        0xE5813000, /* str r3, [r1]                                    */
-        0xE3A03069, /* mov r3, #0x69        ; 'i'                     */
-        0xE5813000, /* str r3, [r1]                                    */
-        0xE3A03021, /* mov r3, #0x21        ; '!'                     */
-        0xE5813000, /* str r3, [r1]                                    */
-        0xEAFFFFFE, /* b   .                                            */
+        0xE3A0143C, /* 0x00 mov r1, #0x3C000000                         */
+        0xE38118C0, /* 0x04 orr r1, r1, #0xC00000 ; r1 = UART0 0x3CC00000 */
+        0xE3A02005, /* 0x08 mov r2, #5                                  */
+        0xE5812004, /* 0x0C str r2, [r1, #4]      ; UCON: TX/RX enabled   */
+        0xE3A03048, /* 0x10 mov r3, #0x48         ; 'H'                  */
+        0xE5813020, /* 0x14 str r3, [r1, #0x20]   ; UTXH                  */
+        0xE3A03069, /* 0x18 mov r3, #0x69         ; 'i'                  */
+        0xE5813020, /* 0x1C str r3, [r1, #0x20]                           */
+        0xE3A03021, /* 0x20 mov r3, #0x21         ; '!'                  */
+        0xE5813020, /* 0x24 str r3, [r1, #0x20]                           */
+        0xEAFFFFFE, /* 0x28 b   .                                         */
     };
 
     arm1176_t cpu = {0};
@@ -598,7 +597,7 @@ static int test_soc_uart(void)
     soc_init(&soc, &cpu);
     soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
 
-    uint32_t self_loop = SOC_SECUREROM_BASE + 0x2C;
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x28;
     int steps = 0;
     while (cpu.r[15] != self_loop && steps < 200 && !cpu.halted) { arm1176_step(&cpu); steps++; }
 
@@ -619,18 +618,20 @@ static int test_soc_uart(void)
 static int test_soc_timer_irq(void)
 {
     static const uint32_t program[] = {
-        0xE3A0143E, /* mov r1, #0x3E000000                                     */
-        0xE3811820, /* orr r1, r1, #0x200000     ; r1 = TIMER base (0x3E200000)*/
-        0xE3A02003, /* mov r2, #3                ; countdown value             */
-        0xE5812000, /* str r2, [r1]              ; TIMER LOAD = 3              */
-        0xE3A020A0, /* mov r2, #0xA0             ; ENABLE|IRQEN                */
-        0xE5812008, /* str r2, [r1, #8]          ; TIMER CONTROL = 0xA0        */
-        0xE3A03438, /* mov r3, #0x38000000                                     */
-        0xE38338E0, /* orr r3, r3, #0xE00000     ; r3 = VIC0 base (0x38E00000) */
-        0xE3A04040, /* mov r4, #0x40             ; bit for IRQ line 6 (timer)  */
-        0xE5834010, /* str r4, [r3, #0x10]       ; VIC INTENABLE |= bit6       */
-        0xE321F053, /* msr cpsr_c, #0x53         ; clear I, keep F + SVC mode  */
-        0xEAFFFFFE, /* b   .                     ; wait for the interrupt      */
+        0xE3A0143E, /* 0x00 mov r1, #0x3E000000                                 */
+        0xE3811820, /* 0x04 orr r1, r1, #0x200000  ; r1 = timer block 0x3E200000 */
+        0xE3A02003, /* 0x08 mov r2, #3                                          */
+        0xE58120A8, /* 0x0C str r2, [r1, #0xA8]    ; timer 4 TCMPB = 3          */
+        0xE3A02030, /* 0x10 mov r2, #0x30          ; compare mode | one-shot    */
+        0xE58120A0, /* 0x14 str r2, [r1, #0xA0]    ; timer 4 config             */
+        0xE3A02001, /* 0x18 mov r2, #1                                          */
+        0xE58120A4, /* 0x1C str r2, [r1, #0xA4]    ; timer 4 control: start     */
+        0xE3A03438, /* 0x20 mov r3, #0x38000000                                 */
+        0xE38338E0, /* 0x24 orr r3, r3, #0xE00000  ; r3 = VIC0 0x38E00000       */
+        0xE3A04040, /* 0x28 mov r4, #0x40          ; bit for IRQ line 6 (timer) */
+        0xE5834010, /* 0x2C str r4, [r3, #0x10]    ; VIC INTENABLE |= bit6      */
+        0xE321F053, /* 0x30 msr cpsr_c, #0x53      ; clear I, keep F + SVC mode */
+        0xEAFFFFFE, /* 0x34 b   .                  ; wait for the interrupt     */
     };
 
     arm1176_t cpu = {0};
@@ -646,7 +647,7 @@ static int test_soc_timer_irq(void)
         steps++;
     }
 
-    uint32_t expected_lr = SOC_SECUREROM_BASE + 0x2C + 4; /* addr of the self-loop + 4 */
+    uint32_t expected_lr = SOC_SECUREROM_BASE + 0x34 + 4; /* addr of the self-loop + 4 */
     int ok = !cpu.halted && ((cpu.cpsr & CPSR_MODE_MASK) == ARM_MODE_IRQ)
            && (cpu.r[15] == VEC_IRQ) && (cpu.r[14] == expected_lr);
     printf("[test 14, SoC: timer -> VIC -> CPU IRQ]  mode=%s pc=0x%08x lr=0x%08x (want 0x%08x)  -> %s\n",
@@ -761,6 +762,40 @@ static int test_soc_nor_readable(void)
     return ok;
 }
 
+/* Test 18: UART receive path. A byte pushed in from the host shows up as
+ * RX-ready in UTRSTAT, is returned by URXH (which pops it), and UTRSTAT
+ * then reports RX-not-ready again. */
+
+static int test_soc_uart_rx(void)
+{
+    static const uint32_t program[] = {
+        0xE3A0143C, /* 0x00 mov r1, #0x3C000000                         */
+        0xE38118C0, /* 0x04 orr r1, r1, #0xC00000 ; r1 = UART0           */
+        0xE5914010, /* 0x08 ldr r4, [r1, #0x10]   ; UTRSTAT (data waiting)*/
+        0xE5915024, /* 0x0C ldr r5, [r1, #0x24]   ; URXH (pops the byte)  */
+        0xE5916010, /* 0x10 ldr r6, [r1, #0x10]   ; UTRSTAT (now empty)   */
+        0xEAFFFFFE, /* 0x14 b   .                                         */
+    };
+
+    arm1176_t cpu = {0};
+    soc_t soc;
+    arm1176_reset(&cpu);
+    soc_init(&soc, &cpu);
+    soc_load_rom_words(&soc, program, sizeof(program) / sizeof(program[0]));
+    soc_uart_rx_push(&soc, 0x5A);
+
+    uint32_t self_loop = SOC_SECUREROM_BASE + 0x14;
+    int steps = 0;
+    while (cpu.r[15] != self_loop && steps < 100 && !cpu.halted) { arm1176_step(&cpu); steps++; }
+
+    int ok = !cpu.halted && (cpu.r[4] & 7u) == 7u && cpu.r[5] == 0x5Au
+           && (cpu.r[6] & 1u) == 0 && (cpu.r[6] & 6u) == 6u;
+    printf("[test 18, SoC: UART RX path]  utrstat_before=0x%x rx=0x%02x utrstat_after=0x%x  -> %s\n",
+           cpu.r[4], cpu.r[5], cpu.r[6], ok ? "PASS" : "FAIL");
+    soc_destroy(&soc);
+    return ok;
+}
+
 int main(void)
 {
     int a = test_arithmetic_loop();
@@ -780,8 +815,9 @@ int main(void)
     int o = test_soc_clock();
     int pp = test_soc_gpio_address();
     int qq = test_soc_nor_readable();
+    int rr = test_soc_uart_rx();
 
-    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && pp && qq;
+    int all_ok = a && b && c && d && e && f && g && h && i && j && k && l && m && n && o && pp && qq && rr;
     printf("\n%s\n", all_ok ? "ALL TESTS PASSED" : "SOME TESTS FAILED");
     return all_ok ? 0 : 1;
 }
