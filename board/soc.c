@@ -85,18 +85,38 @@ static void vic_write(soc_vic_t *v, uint32_t off, uint32_t val)
 }
 
 /* ------------------------------------------------------------------ */
-/* UART (PL011-style) — see soc.h, GROUNDED layout                     */
+/* UART — Samsung-family layout, DERIVED (see soc.h)                   */
+/*                                                                      */
+/* No Apple-specific register table for the S5L8900 UART was found; the */
+/* layout below is the generic Samsung-family one (offsets attested by  */
+/* the S3C/Exynos documentation and drivers, and by FreeBSD's Apple     */
+/* "S5L" UART driver using the same ULCON/UCON offsets). Deliberately   */
+/* minimal: where the family's variants disagree (FIFO count/full bit   */
+/* positions in UFSTAT), only the low 4 bits of the RX count — common   */
+/* to every variant — are reported. The UINTP/UINTSP/UINTM trio is the  */
+/* Exynos-style convention and is the least certain part.               */
 /* ------------------------------------------------------------------ */
 
-#define UART_CR_UARTEN (1u << 0)
-#define UART_CR_TXE    (1u << 8)
-#define UART_CR_RXE    (1u << 9)
-#define UART_IMSC_RXIM (1u << 4)
-#define UART_FR_BUSY   (1u << 3)
-#define UART_FR_RXFE   (1u << 4)
-#define UART_FR_TXFF   (1u << 5)
-#define UART_FR_RXFF   (1u << 6)
-#define UART_FR_TXFE   (1u << 7)
+#define UART_ULCON    0x00
+#define UART_UCON     0x04
+#define UART_UFCON    0x08
+#define UART_UMCON    0x0C
+#define UART_UTRSTAT  0x10
+#define UART_UERSTAT  0x14
+#define UART_UFSTAT   0x18
+#define UART_UMSTAT   0x1C
+#define UART_UTXH     0x20
+#define UART_URXH     0x24
+#define UART_UBRDIV   0x28
+#define UART_UINTP    0x30
+#define UART_UINTSP   0x34
+#define UART_UINTM    0x38
+
+#define UART_UCON_TXMODE      (3u << 2)  /* nonzero = transmitter enabled */
+#define UART_UTRSTAT_RXRDY    (1u << 0)
+#define UART_UTRSTAT_TXEMPTY  (1u << 1)
+#define UART_UTRSTAT_TXDONE   (1u << 2)
+#define UART_INT_RXD          (1u << 0)
 
 static void uart_capture_append(soc_uart_t *u, char c)
 {
@@ -113,44 +133,49 @@ static void uart_capture_append(soc_uart_t *u, char c)
 
 static uint32_t uart_read(soc_uart_t *u, uint32_t off)
 {
-    if (off == 0x00) { /* DR */
+    switch (off) {
+    case UART_ULCON:   return u->ulcon;
+    case UART_UCON:    return u->ucon;
+    case UART_UFCON:   return u->ufcon;
+    case UART_UMCON:   return u->umcon;
+    case UART_UTRSTAT: /* TX is always immediately "done" — no real timing modeled */
+        return UART_UTRSTAT_TXEMPTY | UART_UTRSTAT_TXDONE
+             | (u->rx_count ? UART_UTRSTAT_RXRDY : 0);
+    case UART_UERSTAT: return 0;
+    case UART_UFSTAT:  return u->rx_count > 15 ? 15 : u->rx_count;
+    case UART_UMSTAT:  return 0;
+    case UART_URXH: {
         if (u->rx_count == 0) return 0;
         uint8_t b = u->rx_fifo[u->rx_head];
         u->rx_head = (u->rx_head + 1) % SOC_UART_RX_FIFO_SIZE;
         u->rx_count--;
         return b;
     }
-    if (off == 0x18) { /* FR */
-        uint32_t fr = UART_FR_TXFE; /* TX is always immediately "done" — no real timing modeled */
-        if (u->rx_count == 0) fr |= UART_FR_RXFE;
-        if (u->rx_count == SOC_UART_RX_FIFO_SIZE) fr |= UART_FR_RXFF;
-        return fr;
+    case UART_UBRDIV:  return u->ubrdiv;
+    case UART_UINTP:   return (u->rx_count ? UART_INT_RXD : 0) & ~u->uintm; /* pending and unmasked */
+    case UART_UINTSP:  return (u->rx_count ? UART_INT_RXD : 0);             /* source pending, raw   */
+    case UART_UINTM:   return u->uintm;
+    default:           return 0;
     }
-    if (off == 0x24) return u->ibrd;
-    if (off == 0x28) return u->fbrd;
-    if (off == 0x2C) return u->lcr_h;
-    if (off == 0x30) return u->cr;
-    if (off == 0x38) return u->imsc;
-    if (off == 0x3C) return (u->rx_count > 0) ? UART_IMSC_RXIM : 0; /* RIS */
-    if (off == 0x40) return ((u->rx_count > 0) ? UART_IMSC_RXIM : 0) & u->imsc; /* MIS */
-    return 0;
 }
 
 static void uart_write(soc_uart_t *u, uint32_t off, uint32_t val)
 {
-    if (off == 0x00) { /* DR */
-        if ((u->cr & UART_CR_UARTEN) && (u->cr & UART_CR_TXE)) {
+    switch (off) {
+    case UART_ULCON:  u->ulcon = val; break;
+    case UART_UCON:   u->ucon = val; break;
+    case UART_UFCON:  u->ufcon = val; break;
+    case UART_UMCON:  u->umcon = val; break;
+    case UART_UBRDIV: u->ubrdiv = val; break;
+    case UART_UINTM:  u->uintm = val; break;
+    case UART_UTXH:
+        if (u->ucon & UART_UCON_TXMODE) {
             uart_capture_append(u, (char)val);
             if (u->tx_echo) { putchar((char)val); fflush(stdout); }
         }
-        return;
+        break;
+    default: break; /* read-only status registers and anything unmodeled: ignored */
     }
-    if (off == 0x24) { u->ibrd = val; return; }
-    if (off == 0x28) { u->fbrd = val; return; }
-    if (off == 0x2C) { u->lcr_h = val; return; }
-    if (off == 0x30) { u->cr = val; return; }
-    if (off == 0x38) { u->imsc = val; return; }
-    if (off == 0x44) { return; } /* ICR: RX status is level-derived from the FIFO, nothing to latch-clear */
 }
 
 void soc_uart_rx_push(soc_t *soc, uint8_t byte)
@@ -163,42 +188,124 @@ void soc_uart_rx_push(soc_t *soc, uint8_t byte)
 }
 
 /* ------------------------------------------------------------------ */
-/* Timer (SP804-style, single channel) — see soc.h, GROUNDED layout    */
+/* Timers — PWM-style layout, DERIVED from the sibling S5L8720's        */
+/* documented timer block (see soc.h); the register offsets and bit     */
+/* positions below are that page's, the *behavior* is a minimal model:  */
+/*                                                                      */
+/*  - 8 timers: 0-3 are 16-bit, 4-7 are 32-bit. Per-timer registers at  */
+/*    +0x00 config, +0x04 control, +0x08 TCMPB, +0x0C TCNTB,            */
+/*    +0x10 prescaler (10 bit), +0x14 TCNTO (observation, read-only).   */
+/*  - control bit0 = start/stop, bit1 = manual update (load TCNTB),     */
+/*    bit4 = reset counter (bits 1 and 4 are self-clearing here).        */
+/*  - config bit4 = compare mode, bit5 = one-shot (else interval),      */
+/*    bit24 = count down (timers 4-7 only).                             */
+/*  - One counter step per soc_tick(); prescaler/divider/clock select   */
+/*    are stored but have no effect (rates are README item B5).         */
+/*  - Only timers 4-7 raise interrupts, via the documented IRQ status   */
+/*    register at 0x118 (3 flag bits per timer; this model sets bit0).  */
+/*    Whether timers 0-3 interrupt, and how, is undocumented.           */
+/*  - Writing 0x118 clears the written flag bits (the page only says    */
+/*    "write to clear interrupt request").                              */
 /* ------------------------------------------------------------------ */
 
-#define TIMER_CTRL_ENABLE   (1u << 7)
-#define TIMER_CTRL_PERIODIC (1u << 6)
-#define TIMER_CTRL_IRQEN    (1u << 5)
+#define TIMER_IRQSTAT   0x118u
+#define TIMER_REG_SPAN  0x18u
+#define TCFG_COMPARE    (1u << 4)
+#define TCFG_ONESHOT    (1u << 5)
+#define TCFG_DOWN       (1u << 24)
+#define TCTL_RUN        (1u << 0)
+#define TCTL_MANUAL     (1u << 1)
+#define TCTL_RESET      (1u << 4)
 
-static void timer_tick(soc_timer_t *t)
+static const uint32_t timer_base_off[SOC_TIMER_COUNT] = {0x00, 0x20, 0x40, 0x60, 0xA0, 0xC0, 0xE0, 0x100};
+static const int      timer_irq_shift[4] = {24, 16, 8, 0}; /* IRQ status bits for timers 4,5,6,7 */
+
+static uint32_t timer_mask(int i) { return i >= 4 ? 0xFFFFFFFFu : 0xFFFFu; }
+
+static int timer_find(uint32_t off, uint32_t *reg_off)
 {
-    if (!(t->control & TIMER_CTRL_ENABLE)) return;
-    if (t->value == 0) {
-        if (t->control & TIMER_CTRL_IRQEN) t->interrupt_pending = true;
-        if (t->control & TIMER_CTRL_PERIODIC) t->value = t->bg_load;
-        /* else: free-running one-shot stays at 0 until reloaded */
-        return;
+    for (int i = 0; i < SOC_TIMER_COUNT; i++) {
+        if (off >= timer_base_off[i] && off < timer_base_off[i] + TIMER_REG_SPAN) {
+            *reg_off = off - timer_base_off[i];
+            return i;
+        }
     }
-    t->value--;
+    return -1;
 }
 
 static uint32_t timer_read(soc_timer_t *t, uint32_t off)
 {
-    if (off == 0x00) return t->load;
-    if (off == 0x04) return t->value;
-    if (off == 0x08) return t->control;
-    if (off == 0x10) return t->interrupt_pending ? 1u : 0u;                                  /* RIS */
-    if (off == 0x14) return (t->interrupt_pending && (t->control & TIMER_CTRL_IRQEN)) ? 1u : 0u; /* MIS */
-    if (off == 0x18) return t->bg_load;
-    return 0;
+    if (off == TIMER_IRQSTAT) {
+        uint32_t st = 0;
+        for (int k = 0; k < 4; k++) st |= (uint32_t)(t->u[4 + k].flags & 7u) << timer_irq_shift[k];
+        return st;
+    }
+    uint32_t r;
+    int i = timer_find(off, &r);
+    if (i < 0) return 0;
+    soc_timer_unit_t *u = &t->u[i];
+    switch (r) {
+    case 0x00: return u->cfg;
+    case 0x04: return u->run ? TCTL_RUN : 0;
+    case 0x08: return u->tcmpb;
+    case 0x0C: return u->tcntb;
+    case 0x10: return u->presc;
+    case 0x14: return u->tcnt;
+    default:   return 0;
+    }
 }
 
 static void timer_write(soc_timer_t *t, uint32_t off, uint32_t val)
 {
-    if (off == 0x00) { t->load = val; t->value = val; return; }
-    if (off == 0x08) { t->control = val; return; }
-    if (off == 0x0C) { t->interrupt_pending = false; return; } /* INTCLR */
-    if (off == 0x18) { t->bg_load = val; return; }
+    if (off == TIMER_IRQSTAT) {
+        for (int k = 0; k < 4; k++) t->u[4 + k].flags &= (uint8_t)~((val >> timer_irq_shift[k]) & 7u);
+        return;
+    }
+    uint32_t r;
+    int i = timer_find(off, &r);
+    if (i < 0) return;
+    soc_timer_unit_t *u = &t->u[i];
+    uint32_t m = timer_mask(i);
+    switch (r) {
+    case 0x00: u->cfg = val; break;
+    case 0x04:
+        if (val & TCTL_MANUAL) u->tcnt = u->tcntb & m;
+        if (val & TCTL_RESET)  u->tcnt = 0;
+        u->run = (val & TCTL_RUN) != 0;
+        break;
+    case 0x08: u->tcmpb = val & m; break;
+    case 0x0C: u->tcntb = val & m; break;
+    case 0x10: u->presc = val & 0x3FFu; break;
+    default: break; /* TCNTO is read-only */
+    }
+}
+
+static void timer_tick(soc_timer_t *t)
+{
+    for (int i = 0; i < SOC_TIMER_COUNT; i++) {
+        soc_timer_unit_t *u = &t->u[i];
+        if (!u->run) continue;
+        uint32_t m = timer_mask(i);
+        bool down = (i >= 4) && (u->cfg & TCFG_DOWN);
+        bool match = false;
+        if (!down) {
+            u->tcnt = (u->tcnt + 1) & m;
+            match = (u->cfg & TCFG_COMPARE) ? (u->tcnt == (u->tcmpb & m)) : (u->tcnt == 0);
+        } else {
+            u->tcnt = (u->tcnt - 1) & m;
+            match = (u->tcnt == 0);
+        }
+        if (!match) continue;
+        if (i >= 4) u->flags |= 1u;               /* "handler 1" flag; only timers 4-7 have a documented IRQ status */
+        if (u->cfg & TCFG_ONESHOT) u->run = false;
+        else u->tcnt = down ? (u->tcntb & m) : 0; /* interval mode restarts */
+    }
+}
+
+static bool timer_irq_pending(const soc_timer_t *t)
+{
+    for (int i = 4; i < SOC_TIMER_COUNT; i++) if (t->u[i].flags) return true;
+    return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -207,7 +314,7 @@ static void timer_write(soc_timer_t *t, uint32_t off, uint32_t val)
 /*                                                                      */
 /* TIMING MODEL: this charges exactly one timer tick per CPU            */
 /* instruction, which is not remotely cycle-accurate (real hardware's   */
-/* timer runs off a fixed clock independent of instruction timing) but  */
+/* timers run off fixed clocks independent of instruction timing) but   */
 /* is simple, deterministic, and enough to make timer interrupts and    */
 /* boot-time delay loops actually terminate in a test/bring-up setting. */
 /* ------------------------------------------------------------------ */
@@ -215,11 +322,11 @@ static void timer_write(soc_timer_t *t, uint32_t off, uint32_t val)
 void soc_tick(soc_t *soc)
 {
     timer_tick(&soc->timer);
-    soc->vic0.raw_intr = (soc->timer.interrupt_pending && (soc->timer.control & TIMER_CTRL_IRQEN))
+    soc->vic0.raw_intr = timer_irq_pending(&soc->timer)
                        ? (soc->vic0.raw_intr | (1u << SOC_IRQ_TIMER))
                        : (soc->vic0.raw_intr & ~(1u << SOC_IRQ_TIMER));
 
-    bool uart_irq = (soc->uart0.rx_count > 0) && (soc->uart0.imsc & UART_IMSC_RXIM);
+    bool uart_irq = (soc->uart0.rx_count > 0) && !(soc->uart0.uintm & UART_INT_RXD);
     soc->vic0.raw_intr = uart_irq ? (soc->vic0.raw_intr | (1u << SOC_IRQ_UART0))
                                   : (soc->vic0.raw_intr & ~(1u << SOC_IRQ_UART0));
 
@@ -346,7 +453,8 @@ static void soc_bus_write32(void *ctx, uint32_t addr, uint32_t val)
 
 /* 16/8-bit accesses: memory regions get real narrow accessors; every
  * peripheral register in this file is modeled as 32-bit-only (true to
- * real PL011/PL192/SP804 hardware), so narrow accesses to those are
+ * typical memory-mapped peripheral blocks of this era), so narrow
+ * accesses to those are
  * serviced by widening through the 32-bit path — a reasonable
  * approximation for register windows that real firmware always
  * accesses with LDR/STR (word) anyway. */
