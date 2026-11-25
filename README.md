@@ -29,16 +29,17 @@ include/cp15.h            CP15 register state and public API (see its header
 include/vfp.h             VFP register state and public API (ditto)
 include/jazelle.h         Jazelle scope notes and public API (ditto)
 board/soc.c              S5L8900 SoC/board layer: memory-map dispatch,
-                          PL192-style VIC, PL011-style UART, SP804-style
-                          timer, CONFIRMED clock controller, GPIO stub (see soc.h — separate from
+                          PL192 VIC, Samsung-family UART and PWM-style
+                          timers (both DERIVED), CONFIRMED clock controller,
+                          GPIO stub (see soc.h — separate from
                           src/ since this is the board the CPU plugs into,
                           not part of the CPU die)
 include/soc.h             SoC memory map and peripheral state. Its header
                           comment is required reading before trusting any
                           address in it — see "What's implemented" below
 test/test_bus.c/.h       Flat-RAM bus used only for standalone CPU-only testing
-test/main.c              Seventeen hand-assembled smoke-test programs (3 ARM,
-                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 6 SoC)
+test/main.c              Eighteen hand-assembled smoke-test programs (3 ARM,
+                          2 Thumb, 2 CP15/MMU/TCM, 3 VFP, 1 Jazelle, 7 SoC)
 Makefile                 `make`, `make run`, `make clean`
 ```
 
@@ -187,10 +188,12 @@ make run
 - **S5L8900 SoC/board layer** (`soc.h`/`soc.c`) — the memory map and
   peripherals the CPU is actually plugged into. **Read `soc.h`'s header
   comment before trusting any address.** Every region is labeled with one
-  of four confidence tiers: CONFIRMED (traced to a specific source for
+  of five confidence tiers: CONFIRMED (traced to a specific source for
   this chip), INFERRED (follows by reasoning from confirmed facts but no
-  source states it), GROUNDED (a real, standard ARM peripheral layout used
-  as a stand-in), or PLACEHOLDER (picked only to give a region a
+  source states it), GROUNDED (a standard layout that Apple's own data
+  confirms this chip uses — only the PL192 VIC), DERIVED (a layout taken
+  from a related chip or family, not verified for the S5L8900 — the UART
+  and timers), or PLACEHOLDER (picked only to give a region a
   non-overlapping home). The S5L8900 has no public datasheet; sources are
   community reverse engineering plus Apple's own device tree as captured
   from real devices.
@@ -250,19 +253,32 @@ make run
     VIC0 is modeled; VIC1's address is known but it isn't implemented (B2).
     IRQ/FIQ routing via `VICINTSELECT`, enable/clear, software interrupts,
     and a simplified (non-priority-stack) vector address readback.
-  - **UART**: real base address, but the register *layout* is a PL011 stand-
-    in that is likely wrong for this chip (Apple's driver is
-    `AppleS5L8900XSerial`, and the Linux binding list has a separate
-    `apple,s5l-uart` — a Samsung-family UART). It works for our tests
-    because test and model agree with each other; real firmware would not.
-    TX is captured to `soc_uart_t.tx_capture` and optionally echoed. The
-    tree labels UART0 "iap" (dock serial) and UART4 (`0x3CC10000`)
-    "debug"; which one iBoot uses for its console is unverified.
-  - **Timer**: real base (`0x3E200000`, CONFIRMED on the iPhone 2G tree)
-    but an SP804-style stand-in layout that is likely wrong: the sibling
-    S5L8720's timer block is Samsung PWM-style (counter/compare buffer
-    registers), not SP804, and the S5L8900's own layout is unverified. Test 14 proves the timer-to-VIC-to-CPU-IRQ
-    path end to end.
+  - **UART** (DERIVED layout): real base address; the registers follow
+    the generic Samsung family (ULCON/UCON/UFCON/UMCON at `0x00`-`0x0C`,
+    UTRSTAT `0x10`, UFSTAT `0x18`, UTXH `0x20`, URXH `0x24`, UBRDIV `0x28`,
+    plus Exynos-style interrupt registers at `0x30`-`0x38`). It replaced a
+    PL011 stand-in that had no evidence at all; the basis is that the
+    chip's driver is Apple's `AppleS5L8900XSerial` and FreeBSD's Apple
+    "S5L" UART driver uses the same ULCON/UCON offsets. No S5L8900-specific
+    register table was found, so this is plausible, not verified.
+    Deliberately minimal where the family's variants disagree (UFSTAT
+    reports only the low 4 bits of the RX count). Transmit is enabled by a
+    nonzero TX mode in UCON; TX is captured to `soc_uart_t.tx_capture` and
+    optionally echoed. Tests 13 (transmit) and 18 (receive). The tree
+    labels UART0 "iap" (dock serial) and UART4 (`0x3CC10000`) "debug";
+    which one iBoot uses for its console is unverified.
+  - **Timers** (DERIVED layout): real base (`0x3E200000`). The layout is
+    the sibling S5L8720's documented PWM-style block (The iPhone Wiki,
+    sourced from reversing iBoot, openiBoot and experiments): eight timers
+    (0-3 are 16-bit, 4-7 are 32-bit) with per-timer config / control /
+    TCMPB / TCNTB / prescaler / TCNTO registers, and a shared IRQ-status
+    register at `0x118` for timers 4-7. It replaced an SP804 stand-in. The
+    register offsets and bit positions are the source's; the behavior on
+    top (start/stop, manual update, compare/one-shot/interval, count-down
+    on timers 4-7, one step per `soc_tick()`) is a minimal approximation.
+    Prescaler, divider and clock-select are stored but ignored, and only
+    timers 4-7 raise interrupts since only they have a documented status
+    register. Test 14 proves timer-to-VIC-to-CPU-IRQ end to end.
   - **GPIO**: real address, but a plain read/write scratch array (test 16).
   - **Timing model**: `soc_tick()` — called once per `arm1176_step()` by
     the caller — charges one timer tick per CPU instruction. Deterministic,
@@ -343,22 +359,27 @@ core work.
 
 ### Part B — S5L8900 SoC/board (`board/`, `include/soc.h`)
 
-- **B1. Real S5L8900 register values** *(addresses done; layouts open)*.
-  Done, all traced to the iPhone 2G (M68AP) node tree and/or the iPod touch
-  dumps: VIC0/VIC1, UART0/1/3/4, GPIO, clock, timer, watchdog, I2C0/1,
-  SPI0/1/2, USB PHY, NAND controllers, NOR, plus the rest of the on-chip
-  blocks, all as constants in `soc.h`. **Still open:**
-  1. The timer's register layout. The model is an SP804 stand-in; the
-     sibling S5L8720's timer page documents a PWM-style block, which is the
-     likeliest shape but is unverified for the S5L8900.
-  2. The UART's register layout (Samsung-style per the Linux binding hint,
-     not PL011), and which UART is the console.
+- **B1. Real S5L8900 register values** *(addresses done; layouts derived,
+  not verified)*. Done, all traced to the iPhone 2G (M68AP) node tree
+  and/or the iPod touch dumps: every peripheral base (VIC0/1, UART0/1/3/4,
+  GPIO, clock, timer, watchdog, I2C0/1, SPI0/1/2, USB PHY, NAND, NOR, and
+  the rest) as constants in `soc.h`. The UART and timer layouts are now
+  DERIVED from the Samsung family and the sibling S5L8720 respectively,
+  rather than the no-evidence PL011/SP804 stand-ins they replaced.
+  **Still open:**
+  1. Verify the DERIVED layouts against S5L8900-specific code. The least
+     certain parts: the UART's UFSTAT/interrupt registers; the timers'
+     prescaler/divider/clock-select behavior, which clock they run from,
+     and whether timers 0-3 interrupt. Best sources: openiBoot's UART and
+     timer drivers, or the device tree's remaining properties.
+  2. Which UART is the console (UART0 "iap" vs UART4 "debug").
   3. SRAM versus `edram`: whether the on-chip RAM the LLB runs from is the
      `0x22000000` region or the `0x18000000` `edram` node, and its size.
   4. NOR's real size (placeholder 1MB; NVRAM sits at +`0xFC000` so it is at
      least that).
   Rule for this item: only addresses traceable to a specific source get
-  promoted from PLACEHOLDER; reasoning-only results are labeled INFERRED.
+  promoted from PLACEHOLDER; reasoning-only results are labeled INFERRED;
+  borrowed layouts are labeled DERIVED.
 - **B2. A second VIC instance, and real IRQ line assignments.** VIC1's
   address is now known (`0x38E01000`) but nothing models it, and only VIC0's
   32 lines exist. The device tree lists an interrupt number for every
