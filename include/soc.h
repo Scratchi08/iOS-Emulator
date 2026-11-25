@@ -19,7 +19,7 @@
  * it comes from community reverse engineering of iBoot/the bootrom
  * (mostly the iPhone Dev Team / iDroid Project's openiBoot, which
  * genuinely ran on real iPhone 2G hardware). This file distinguishes
- * four confidence levels; every #define below is commented with
+ * five confidence levels; every #define below is commented with
  * which one it is:
  *
  *   CONFIRMED   — sourced from a specific community reference for this
@@ -79,23 +79,26 @@
  *                  the bootrom jumping into code at 0x22000000 that is
  *                  absent from public ROM dumps. Consistent with SRAM,
  *                  but the size here is only a lower bound. UNRESOLVED: the iPhone 2G device tree also has an "edram" node at 0x18000000 (via the second arm-io range), which may be the on-chip RAM the LLB actually runs from; it is not modeled (README B1).
- *   GROUNDED     — not S5L8900-specific, but a real, standard, publicly
- *                  documented ARM PrimeCell peripheral that openiBoot's
- *                  own interrupt.c confirms this SoC family actually
- *                  uses (its code literally names VICINTENABLE,
+ *   GROUNDED     — a real, standard, publicly documented layout that
+ *                  Apple's own data confirms this chip uses. Currently
+ *                  just the interrupt controller: the device tree labels
+ *                  it compatible = "vic,pl192", and openiBoot's code
+ *                  names stock PL192 registers (VICINTENABLE,
  *                  VICINTENCLEAR, VICINTSELECT, VICSWPRIORITYMASK,
- *                  VICVECTADDRS — stock PL192 VIC register names). The
- *                  UART (PL011-style) and timer (SP804-style) register
- *                  *layouts* here are standard ARM PrimeCells used as a
- *                  stand-in, and should be treated as likely WRONG for
- *                  this chip: the S5L8900's serial driver is Apple's
- *                  "AppleS5L8900XSerial" and the Linux binding list
- *                  carries a separate `apple,s5l-uart`, i.e. a
- *                  Samsung-family UART rather than a PL011. Their
- *                  *base addresses* are now real (UART0, timer); the
- *                  register layouts are unverified either way — the
- *                  sibling S5L8720's timer is Samsung PWM-style
- *                  (TCNTB/TCMPB), not SP804 (see README item B1).
+ *                  VICVECTADDRS); the layout comes from ARM's PL192 TRM.
+ *   DERIVED      — a layout taken from a related chip or family, not
+ *                  verified for the S5L8900. The UART and timer are
+ *                  here. The UART follows the generic Samsung-family
+ *                  layout (the chip's driver is Apple's
+ *                  "AppleS5L8900XSerial", and FreeBSD's Apple "S5L" UART
+ *                  driver uses the same ULCON/UCON offsets). The timers
+ *                  follow the sibling S5L8720's documented PWM-style
+ *                  block (The iPhone Wiki, "S5L8720 Timers (Hardware)",
+ *                  itself sourced from reversing iBoot, openiBoot and
+ *                  experiments). Offsets and bit positions are the
+ *                  source's; the *behavior* modeled on top is a minimal
+ *                  approximation (see soc.c). These replaced earlier
+ *                  PL011 and SP804 stand-ins that had no evidence at all.
  *   PLACEHOLDER  — a base address or size picked to give every region
  *                  a sensible, non-overlapping home so the emulator
  *                  works end-to-end, but not sourced from anywhere.
@@ -157,14 +160,14 @@
 
 #define SOC_VIC0_BASE        0x38E00000u   /* CONFIRMED (PL192, first of two) */
 #define SOC_VIC1_BASE        0x38E01000u   /* CONFIRMED address; NOT YET MODELED — README item B2 */
-#define SOC_UART0_BASE       0x3CC00000u   /* CONFIRMED address; register LAYOUT unverified (see GROUNDED note) */
+#define SOC_UART0_BASE       0x3CC00000u   /* CONFIRMED address; register LAYOUT DERIVED, not verified (see above) */
 #define SOC_GPIO_BASE        0x3E400000u   /* CONFIRMED address; register layout unmodeled (plain scratch array) */
 #define SOC_GPIO_SIZE        0x00001000u
 
 /* CONFIRMED address (node timer@6200000 in both the iPod1,1 dump and the
  * iPhone 2G M68AP tree; the iPod dump's reg is {0x06200000, 0x1000}, i.e.
  * 0x38000000 + 0x06200000, size 0x1000). The register LAYOUT modeled in
- * soc.c is still an SP804 stand-in and is likely wrong (see GROUNDED). */
+ * soc.c is DERIVED from the sibling S5L8720's timer block (see above). */
 #define SOC_TIMER_BASE       0x3E200000u
 
 /* CONFIRMED addresses of other on-chip blocks (same device tree), listed
@@ -280,7 +283,8 @@ typedef struct {
 typedef struct {
     uint8_t  rx_fifo[SOC_UART_RX_FIFO_SIZE];
     uint32_t rx_head, rx_tail, rx_count;
-    uint32_t ibrd, fbrd, lcr_h, cr, imsc;
+    /* Samsung-family control registers (DERIVED, see above). */
+    uint32_t ulcon, ucon, ufcon, umcon, ubrdiv, uintm;
 
     /* Transmitted bytes are both appended here (a growable capture
      * buffer, mainly for tests) and, if tx_echo is set, written
@@ -291,11 +295,16 @@ typedef struct {
     bool     tx_echo;
 } soc_uart_t;
 
+#define SOC_TIMER_COUNT 8   /* timers 0-3 are 16-bit, 4-7 are 32-bit */
+
 typedef struct {
-    uint32_t load, bg_load;
-    uint32_t value;
-    uint32_t control;   /* bit7=enable, bit6=periodic, bit5=irq-enable, bit1=32-bit */
-    bool     interrupt_pending;
+    uint32_t cfg, ctrl, tcmpb, tcntb, presc, tcnt;
+    bool     run;
+    uint8_t  flags;   /* 3-bit IRQ flag field (timers 4-7 only are exposed) */
+} soc_timer_unit_t;
+
+typedef struct {
+    soc_timer_unit_t u[SOC_TIMER_COUNT];
 } soc_timer_t;
 
 /* CONFIRMED register set — see the CONFIRMED note above and soc.c's
